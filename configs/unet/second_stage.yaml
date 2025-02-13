@@ -101,3 +101,13 @@ model:
     temporal_position_encoding_max_len: 16
     temporal_attention_dim_div: 1
     zero_initialize: true
+
+lora:
+  use_lora: true
+  target_modules: ["to_q", "to_k", "to_v"]
+  lora_alpha: 1
+  lora_dropout: 0.0
+  bias: "none" 
+  r: 8
+  task_type: "IMAGE_GENERATION"
+  resume_lora_path: null

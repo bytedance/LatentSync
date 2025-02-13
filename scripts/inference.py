@@ -21,6 +21,7 @@ from latentsync.pipelines.lipsync_pipeline import LipsyncPipeline
 from diffusers.utils.import_utils import is_xformers_available
 from accelerate.utils import set_seed
 from latentsync.whisper.audio2feature import Audio2Feature
+from peft import PeftModel
 
 
 def main(config, args):
@@ -59,6 +60,12 @@ def main(config, args):
     if is_xformers_available():
         unet.enable_xformers_memory_efficient_attention()
 
+    # load lora
+    if args.inference_lora_path:
+        unet = PeftModel.from_pretrained(unet, args.inference_lora_path)
+        unet.merge_and_unload()
+        print(f"Loaded lora checkpoint path: {args.inference_lora_path}")
+
     pipeline = LipsyncPipeline(
         vae=vae,
         audio_encoder=audio_encoder,
@@ -91,6 +98,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--unet_config_path", type=str, default="configs/unet.yaml")
     parser.add_argument("--inference_ckpt_path", type=str, required=True)
+    parser.add_argument("--inference_lora_path", type=str, default="")
     parser.add_argument("--video_path", type=str, required=True)
     parser.add_argument("--audio_path", type=str, required=True)
     parser.add_argument("--video_out_path", type=str, required=True)

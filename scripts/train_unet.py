@@ -52,7 +52,7 @@ from eval.syncnet import SyncNetEval
 from eval.syncnet_detect import SyncNetDetector
 from eval.eval_sync_conf import syncnet_eval
 import lpips
-
+from peft import LoraConfig, get_peft_model, PeftModel
 
 logger = get_logger(__name__)
 
@@ -133,8 +133,26 @@ def main(config):
         syncnet.load_state_dict(syncnet_checkpoint["state_dict"])
         syncnet.requires_grad_(False)
 
-    unet.requires_grad_(True)
-    trainable_params = list(unet.parameters())
+    # Injecting LoRA layers into unet
+    if config.lora.use_lora:
+        if config.lora.resume_lora_path:
+            unet = PeftModel.from_pretrained(unet, config.lora.resume_lora_path, is_trainable=True)
+            resume_global_step = torch.load(os.path.join(config.lora.resume_lora_path, "state_dict.pt"), map_location=device)["global_step"]
+        else:
+            lora_config = LoraConfig(
+                r=config.lora.r,                      
+                lora_alpha=config.lora.lora_alpha,            
+                target_modules=config.lora.target_modules,  
+                bias=config.lora.bias,
+                lora_dropout=config.lora.lora_dropout,
+                task_type=config.lora.task_type,      
+            )
+            unet = get_peft_model(unet, lora_config)
+        unet.print_trainable_parameters()
+        trainable_params = [p for p in unet.parameters() if p.requires_grad]
+    else:
+        unet.requires_grad_(True)
+        trainable_params = list(unet.parameters())
 
     if config.optimizer.scale_lr:
         config.optimizer.lr = config.optimizer.lr * num_processes
@@ -440,15 +458,28 @@ def main(config):
                             ("Sync loss", train_step_list, sync_loss_list),
                         )
                 model_save_path = os.path.join(output_dir, f"checkpoints/checkpoint-{global_step}.pt")
-                state_dict = {
-                    "global_step": global_step,
-                    "state_dict": unet.module.state_dict(),  # to unwrap DDP
-                }
-                try:
-                    torch.save(state_dict, model_save_path)
-                    logger.info(f"Saved checkpoint to {model_save_path}")
-                except Exception as e:
-                    logger.error(f"Error saving model: {e}")
+                
+                if config.lora.use_lora:
+                    lora_save_path = os.path.join(output_dir, f"checkpoints/checkpoint-{global_step}")
+                    state_dict = {
+                        "global_step": global_step,
+                    }
+                    try:
+                        unet.module.save_pretrained(lora_save_path, save_adapter=True)
+                        torch.save(state_dict, os.path.join(lora_save_path, "state_dict.pt"))
+                        logger.info(f"Saved lora checkpoint to {lora_save_path}")
+                    except Exception as e:
+                        logger.error(f"Error saving model: {e}")
+                else:
+                    state_dict = {
+                        "global_step": global_step,
+                        "state_dict": unet.module.state_dict(),  # to unwrap DDP
+                    }
+                    try:
+                        torch.save(state_dict, model_save_path)
+                        logger.info(f"Saved checkpoint to {model_save_path}")
+                    except Exception as e:
+                        logger.error(f"Error saving model: {e}")
 
                 # Validation
                 logger.info("Running validation... ")
