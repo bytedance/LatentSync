@@ -55,6 +55,8 @@ ENV LD_LIBRARY_PATH="$CUDA_HOME/lib64:$LD_LIBRARY_PATH"
 ENV TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;9.0"
 ENV HF_HOME=/huggingface
 
+RUN source setup_env.sh
+
 RUN conda install -y -c conda-forge ffmpeg
 
 
