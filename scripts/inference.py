@@ -118,6 +118,7 @@ def main(config, args):
     )
     
     print("Cleaning up pipeline...")
+    helper.disable()
     cleanup_pipeline(pipeline)
     del pipeline
 
