@@ -27,7 +27,7 @@ from DeepCache import DeepCacheSDHelper
 def cleanup_pipeline(pipeline):
     try:
         pipeline.vae.to("cpu")
-        pipeline.denoising_unet.to("cpu")
+        pipeline.unet.to("cpu")
         if hasattr(pipeline.audio_encoder, "model"):
             pipeline.audio_encoder.model.to("cpu")
         pipeline.scheduler = None
