@@ -87,7 +87,7 @@ def create_args(
 
 
 # Create Gradio interface
-with gr.Blocks(title="LatentSync demo") as demo:
+with gr.Blocks(title="LatentSync") as demo:
     gr.Markdown(
     """
     <h1 align="center">LatentSync</h1>
