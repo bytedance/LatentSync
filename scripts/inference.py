@@ -23,6 +23,20 @@ from latentsync.pipelines.lipsync_pipeline import LipsyncPipeline
 from accelerate.utils import set_seed
 from latentsync.whisper.audio2feature import Audio2Feature
 
+def cleanup_pipeline(pipeline):
+    try:
+        pipeline.vae.to("cpu")
+        pipeline.denoising_unet.to("cpu")
+        if hasattr(pipeline.audio_encoder, "model"):
+            pipeline.audio_encoder.model.to("cpu")
+        pipeline.scheduler = None
+        if hasattr(pipeline, "image_processor"):
+            del pipeline.image_processor
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
+
+    torch.cuda.empty_cache()
+    gc.collect()
 
 def main(config, args):
     if not os.path.exists(args.video_path):
@@ -78,7 +92,7 @@ def main(config, args):
     else:
         torch.seed()
 
-    print(f"Initial seed: {torch.initial_seed()}")
+    print(f"Initial seed2: {torch.initial_seed()}")
 
     pipeline(
         video_path=args.video_path,
@@ -94,20 +108,10 @@ def main(config, args):
         mask_image_path=config.data.mask_image_path,
     )
     
-
-    # Spostare tutto su CPU (opzionale ma utile)
+    print("Cleaning up pipeline...")
+    cleanup_pipeline(pipeline)
     del pipeline
-    del vae
-    del denoising_unet
-    del audio_encoder
-    del scheduler
 
-    # Garbage collection
-    gc.collect()
-
-    # Svuota cache CUDA
-    torch.cuda.empty_cache()
-    torch.cuda.ipc_collect()
 
 
 if __name__ == "__main__":

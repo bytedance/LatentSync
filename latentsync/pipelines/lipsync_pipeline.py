@@ -6,6 +6,7 @@ import os
 import shutil
 from typing import Callable, List, Optional, Union
 import subprocess
+import gc
 
 import numpy as np
 import torch
@@ -485,3 +486,5 @@ class LipsyncPipeline(DiffusionPipeline):
 
         command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
         subprocess.run(command, shell=True)
+
+        print(f"Output video saved to {video_out_path}")
