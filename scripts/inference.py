@@ -14,6 +14,7 @@
 
 import argparse
 import os
+import gc
 from omegaconf import OmegaConf
 import torch
 from diffusers import AutoencoderKL, DDIMScheduler
@@ -92,6 +93,21 @@ def main(config, args):
         height=config.data.resolution,
         mask_image_path=config.data.mask_image_path,
     )
+    
+
+    # Spostare tutto su CPU (opzionale ma utile)
+    del pipeline
+    del vae
+    del denoising_unet
+    del audio_encoder
+    del scheduler
+
+    # Garbage collection
+    gc.collect()
+
+    # Svuota cache CUDA
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
 
 
 if __name__ == "__main__":
