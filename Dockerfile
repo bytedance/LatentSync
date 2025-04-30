@@ -75,6 +75,8 @@ RUN huggingface-cli download ByteDance/LatentSync-1.5 latentsync_unet.pt --local
 
 #RUN source patchtransformers.sh
 
+RUN apt-get update && apt-get install vim -y
+
 # Espone la porta per Gradio
 EXPOSE 8080
 

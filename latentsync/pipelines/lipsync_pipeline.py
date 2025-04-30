@@ -4,8 +4,7 @@ import inspect
 import math
 import os
 import shutil
-from typing import Callable, List, Optional, Union, Tuple
-
+from typing import Callable, List, Optional, Union
 import subprocess
 import gc
 
@@ -264,17 +263,18 @@ class LipsyncPipeline(DiffusionPipeline):
             affine_matrices.append(affine_matrix)
 
         faces = torch.stack(faces)
-        return faces, video_frames, boxes, affine_matrices
-    
-    
+        return faces, boxes, affine_matrices
 
-    def restore_video_old(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list):
+    def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list):
         video_frames = video_frames[: len(faces)]
         out_frames = []
+        skipped_count = 0
         print(f"Restoring {len(faces)} faces...")
         for index, face in enumerate(tqdm.tqdm(faces)):
-            if(affine_matrices[index] is None):
-                continue
+            if affine_matrices[index] is None:
+                skipped_count += 1
+                out_frames.append(video_frames[index])
+                continue # Lascia out_frames[index] invariato (è l'originale)
             x1, y1, x2, y2 = boxes[index]
             height = int(y2 - y1)
             width = int(x2 - x1)
@@ -286,67 +286,8 @@ class LipsyncPipeline(DiffusionPipeline):
             out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
             out_frames.append(out_frame)
         return np.stack(out_frames, axis=0)
-    
-    def restore_video(self,
-                      faces: torch.Tensor, # Output modello (N_chunks, C, H, W) [-1, 1]
-                      video_frames: np.ndarray, # Originale completo (F, H, W, C) [0, 255]
-                      # boxes: list, # Rimosso se non usato
-                      affine_matrices: list # Matrici o None (N_chunks)
-                      ) -> np.ndarray: # Ritorna sempre numpy
-        """ Usa la matrice affine come segnale per saltare il ripristino. """
-        num_generated_faces = len(faces)
-        num_original_frames = len(video_frames)
-        output_length = min(num_original_frames, num_generated_faces)
-        # Inizia SEMPRE con una copia dell'array NumPy originale
-        out_frames = video_frames[:output_length].copy()
 
-        print(f"Restoring potentially {num_generated_faces} faces onto {output_length} original frames...")
-        if not hasattr(self, 'image_processor') or self.image_processor is None:
-             print("Warning: Reinitializing ImageProcessor in restore_video.")
-             self.image_processor = ImageProcessor(resolution=self.unet.config.sample_size * self.vae_scale_factor, device=self._execution_device)
-
-        restored_count = 0
-        skipped_count = 0
-        for index in tqdm(range(output_length), desc="Restoring Faces"):
-            matrix = affine_matrices[index] # Prendi matrice/None
-
-            # ---- Logica Skip ----
-            if matrix is None:
-                skipped_count += 1
-                continue # Lascia out_frames[index] invariato (è l'originale)
-            # ---- Fine Logica Skip ----
-
-            # Prepara volto generato [-1, 1] -> numpy HWC uint8 (come prima)
-            generated_face_tensor = faces[index]
-            # Usa denormalize se definito in ImageProcessor, altrimenti inline
-            if hasattr(self.image_processor, 'denormalize_tensor'):
-                generated_face_0_1 = self.image_processor.denormalize_tensor(generated_face_tensor)
-            else:
-                 generated_face_0_1 = (generated_face_tensor / 2 + 0.5).clamp(0, 1)
-            generated_face_np = (generated_face_0_1 * 255).permute(1, 2, 0).to(torch.uint8).cpu().numpy()
-
-            # Prendi frame originale (è già numpy HWC uint8)
-            original_frame_np = video_frames[index]
-
-            # Chiama restore_img
-            try:
-                restored_frame_np = self.image_processor.restorer.restore_img(
-                    original_frame_np, generated_face_np, matrix
-                )
-                out_frames[index] = restored_frame_np # Aggiorna array numpy
-                restored_count += 1
-            except Exception as e:
-                print(f"Warning: Error during restore_img for frame index {index}: {e}. Using original frame.")
-                skipped_count += 1
-                pass # Lascia out_frames[index] invariato
-
-        print(f"Restored {restored_count} faces, skipped {skipped_count} frames.")
-        # Assicura che l'output sia uint8
-        if out_frames.dtype != np.uint8:
-            out_frames = np.clip(out_frames, 0, 255).astype(np.uint8)
-        return out_frames
-
-    def loop_video_old(self, whisper_chunks: list, video_frames: np.ndarray):
+    def loop_video(self, whisper_chunks: list, video_frames: np.ndarray):
         # If the audio is longer than the video, we need to loop the video
         if len(whisper_chunks) > len(video_frames):
             faces, boxes, affine_matrices = self.affine_transform_video(video_frames)
@@ -376,51 +317,6 @@ class LipsyncPipeline(DiffusionPipeline):
             faces, boxes, affine_matrices = self.affine_transform_video(video_frames)
 
         return video_frames, faces, boxes, affine_matrices
-    
-    def loop_video(self, whisper_chunks: list, video_path: str):
-        """
-        Prepara i frame video (looping se necessario) ed esegue la trasformazione affine.
-        Restituisce i dati necessari, inclusa la lista delle matrici (con None).
-        """
-
-        try:
-            (processed_faces_0_255, # F, C, H, W ([0, 255], volti o placeholder)
-             original_video_frames_np, # F, H, W, C ([0, 255])
-             processed_boxes, # Lista[F] (box o None)
-             processed_matrices # Lista[F] (matrice o None) <- IMPORTANTE
-             ) = self.affine_transform_video(video_path)
-        except Exception as e:
-            raise RuntimeError(f"Failed initial video processing for {video_path}: {e}")
-
-        num_original_frames = len(original_video_frames_np)
-        num_whisper_chunks = len(whisper_chunks)
-
-        # --- Logica di Looping/Padding (INVARIATA NEL FUNZIONAMENTO, MA ORA INCLUDE MATRICI) ---
-        looped_processed_faces = []
-        looped_boxes = []
-        looped_matrices = [] # <- Aggiunto
-
-        num_loops_needed = math.ceil(num_whisper_chunks / num_original_frames) if num_original_frames > 0 else 1
-
-        for i in range(num_loops_needed):
-            indices_in_loop = list(range(num_original_frames))
-            if i % 2 != 0: indices_in_loop = indices_in_loop[::-1]
-            for original_idx in indices_in_loop:
-                 looped_processed_faces.append(processed_faces_0_255[original_idx])
-                 looped_boxes.append(processed_boxes[original_idx])
-                 looped_matrices.append(processed_matrices[original_idx]) # <- Aggiunto loop matrici
-
-        # Tronca alle dimensioni richieste dall'audio
-        final_faces_for_inference = torch.stack(looped_processed_faces[:num_whisper_chunks])
-        final_boxes = looped_boxes[:num_whisper_chunks]
-        final_matrices = looped_matrices[:num_whisper_chunks] # <- Lista finale matrici
-
-        # Restituisce i dati preparati (matrici incluse)
-        return (
-                original_video_frames_np,
-                final_faces_for_inference, # [0, 255]
-                final_boxes,
-                final_matrices) # <- Restituisci matrici
 
     @torch.no_grad()
     def __call__(
@@ -481,8 +377,7 @@ class LipsyncPipeline(DiffusionPipeline):
         audio_samples = read_audio(audio_path)
         video_frames = read_video(video_path, use_decord=False)
 
-        #video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
-        video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_path)
+        video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
 
         synced_video_frames = []
 
