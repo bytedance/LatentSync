@@ -18,7 +18,8 @@ import cv2
 from einops import rearrange
 import torch
 import numpy as np
-from typing import Union
+from typing import Union, Tuple, List
+import torch.nn.functional as F
 from .affine_transform import AlignRestore
 from .face_detector import FaceDetector
 
@@ -58,12 +59,11 @@ class ImageProcessor:
         # if bbox is None:
         #     raise RuntimeError("Face not detected")
         if bbox is None or landmark_2d_106 is None:
-            print("Warning: Face not detected. Using placeholder.") # Log opzionale
+            #print("Warning: Face not detected. Using placeholder.") # Log opzionale
             placeholder = torch.full(
                 (3, self.resolution, self.resolution),
                 127.0, # Grigio medio
                 dtype=torch.float32, # Usa float qui, verrà convertito dopo se necessario
-                device=self.restorer.device # Usa il device del restorer
             )
             return placeholder, None, None
 
@@ -122,13 +122,14 @@ class ImageProcessor:
 class VideoProcessor:
     def __init__(self, resolution: int = 512, device: str = "cpu"):
         self.image_processor = ImageProcessor(resolution, device)
+        self.device = device
 
     def affine_transform_video(self, video_path):
         video_frames = read_video(video_path, change_fps=False)
         results = []
         for frame in video_frames:
             frame, _, _ = self.image_processor.affine_transform(frame)
-            results.append(frame)
+            results.append(frame.to(self.device))
         results = torch.stack(results)
 
         results = rearrange(results, "f c h w -> f h w c").numpy()
