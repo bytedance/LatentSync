@@ -56,7 +56,12 @@ class ImageProcessor:
             raise NotImplementedError("Using the CPU for face detection is not supported")
         bbox, landmark_2d_106 = self.face_detector(image)
         if bbox is None:
-            raise RuntimeError("Face not detected")
+            #raise RuntimeError("Face not detected")
+            # Nessuna faccia trovata, restituisci valori neutri
+            empty_face = torch.empty(0)
+            empty_box = [0, 0, 0, 0]
+            identity_matrix = np.eye(2, 3, dtype=np.float32)
+            return empty_face, empty_box, identity_matrix
 
         pt_left_eye = np.mean(landmark_2d_106[[43, 48, 49, 51, 50]], axis=0)  # left eyebrow center
         pt_right_eye = np.mean(landmark_2d_106[101:106], axis=0)  # right eyebrow center
