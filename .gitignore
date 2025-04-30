@@ -49,3 +49,5 @@ wandb/
 !/docs/*
 !/internal/*.png
 .cog/
+all_python_code.txt
+all_code.sh

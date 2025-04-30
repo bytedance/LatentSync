@@ -270,6 +270,8 @@ class LipsyncPipeline(DiffusionPipeline):
         out_frames = []
         print(f"Restoring {len(faces)} faces...")
         for index, face in enumerate(tqdm.tqdm(faces)):
+            if(affine_matrices[index] is None):
+                continue
             x1, y1, x2, y2 = boxes[index]
             height = int(y2 - y1)
             width = int(x2 - x1)
