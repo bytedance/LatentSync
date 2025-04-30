@@ -274,6 +274,7 @@ class LipsyncPipeline(DiffusionPipeline):
             if affine_matrices[index] is None:
                 skipped_count += 1
                 out_frames.append(video_frames[index])
+                print("Skipping frame", index, "no face detected")
                 continue # Lascia out_frames[index] invariato (è l'originale)
             x1, y1, x2, y2 = boxes[index]
             height = int(y2 - y1)
@@ -376,6 +377,7 @@ class LipsyncPipeline(DiffusionPipeline):
 
         audio_samples = read_audio(audio_path)
         video_frames = read_video(video_path, use_decord=False)
+
 
         video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
 
@@ -491,5 +493,4 @@ class LipsyncPipeline(DiffusionPipeline):
 
         command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
         subprocess.run(command, shell=True)
-
         print(f"Output video saved to {video_out_path}")
