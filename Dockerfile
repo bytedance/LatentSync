@@ -80,3 +80,4 @@ EXPOSE 8080
 
 # Comando di default per avviare il server Gradio
 CMD ["python3", "gradio_app.py", "--share", "--server_port", "8080"]
+# python3 gradio_app.py --share --server_port 8080

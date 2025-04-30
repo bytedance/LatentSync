@@ -55,33 +55,31 @@ class ImageProcessor:
         if self.face_detector is None:
             raise NotImplementedError("Using the CPU for face detection is not supported")
         bbox, landmark_2d_106 = self.face_detector(image)
-        if bbox is None:
-            #raise RuntimeError("Face not detected")
-            # Nessuna faccia trovata, restituisci valori neutri
-            empty_face = torch.empty(0)
-            empty_box = [0, 0, 0, 0]
-            identity_matrix = np.eye(2, 3, dtype=np.float32)
-            return empty_face, empty_box, identity_matrix
-
-        pt_left_eye = np.mean(landmark_2d_106[[43, 48, 49, 51, 50]], axis=0)  # left eyebrow center
-        pt_right_eye = np.mean(landmark_2d_106[101:106], axis=0)  # right eyebrow center
-        pt_nose = np.mean(landmark_2d_106[[74, 77, 83, 86]], axis=0)  # nose center
-        # pt_nose = np.mean(landmark_2d_106[[72, 73, 74, 76, 77, 78, 79, 80, 82, 83, 84, 85, 86]], axis=0)  # nose center
+        if bbox is not None:
+            pt_left_eye = np.mean(landmark_2d_106[[43, 48, 49, 51, 50]], axis=0)  # left eyebrow center
+            pt_right_eye = np.mean(landmark_2d_106[101:106], axis=0)  # right eyebrow center
+            pt_nose = np.mean(landmark_2d_106[[74, 77, 83, 86]], axis=0)  # nose center
+            # pt_nose = np.mean(landmark_2d_106[[72, 73, 74, 76, 77, 78, 79, 80, 82, 83, 84, 85, 86]], axis=0)  # nose center
 
 
-        landmarks = [
-            np.round(pt_left_eye),
-            np.round(pt_right_eye),
-            np.round(pt_nose),
-        ]
+            landmarks = [
+                np.round(pt_left_eye),
+                np.round(pt_right_eye),
+                np.round(pt_nose),
+            ]
 
-        lmk3_ = np.zeros((3, 2))
-        lmk3_[0] = landmarks[0]  # left eyebrow center
-        lmk3_[1] = landmarks[1]  # right eyebrow center
-        lmk3_[2] = landmarks[2]  # nose center
+            lmk3_ = np.zeros((3, 2))
+            lmk3_[0] = landmarks[0]  # left eyebrow center
+            lmk3_[1] = landmarks[1]  # right eyebrow center
+            lmk3_[2] = landmarks[2]  # nose center
 
-        face, affine_matrix = self.restorer.align_warp_face(image.copy(), lmks3=lmk3_, smooth=True)
-        box = [0, 0, face.shape[1], face.shape[0]]  # x1, y1, x2, y2
+            face, affine_matrix = self.restorer.align_warp_face(image.copy(), lmks3=lmk3_, smooth=True)
+            box = [0, 0, face.shape[1], face.shape[0]]  # x1, y1, x2, y2
+        else:
+            face = image
+            box = [0, 0, 1, 1]
+            affine_matrix = np.eye(2, 3, dtype=np.float32)
+
         face = cv2.resize(face, (self.resolution, self.resolution), interpolation=cv2.INTER_LANCZOS4)
         face = rearrange(torch.from_numpy(face), "h w c -> c h w")
         return face, box, affine_matrix
