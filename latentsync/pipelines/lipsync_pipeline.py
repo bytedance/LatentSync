@@ -269,13 +269,21 @@ class LipsyncPipeline(DiffusionPipeline):
         video_frames = video_frames[: len(faces)]
         out_frames = []
         skipped_count = 0
+        skip_next = False
         print(f"Restoring {len(faces)} faces...")
         for index, face in enumerate(tqdm.tqdm(faces)):
+            if skip_next:
+                skipped_count += 1
+                out_frames.append(video_frames[index])
+                print("Skipping frame", index, "due to previous skipped block")
+                skip_next = False
+                continue
             if affine_matrices[index] is None:
                 skipped_count += 1
                 out_frames.append(video_frames[index])
+                skip_next = True
                 print("Skipping frame", index, "no face detected")
-                continue # Lascia out_frames[index] invariato (è l'originale)
+                continue
             x1, y1, x2, y2 = boxes[index]
             height = int(y2 - y1)
             width = int(x2 - x1)
