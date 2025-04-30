@@ -68,6 +68,7 @@ class ImageProcessor:
         pt_nose = np.mean(landmark_2d_106[[74, 77, 83, 86]], axis=0)  # nose center
         # pt_nose = np.mean(landmark_2d_106[[72, 73, 74, 76, 77, 78, 79, 80, 82, 83, 84, 85, 86]], axis=0)  # nose center
 
+
         landmarks = [
             np.round(pt_left_eye),
             np.round(pt_right_eye),
