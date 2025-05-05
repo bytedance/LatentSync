@@ -265,23 +265,22 @@ class LipsyncPipeline(DiffusionPipeline):
         faces = torch.stack(faces)
         return faces, boxes, affine_matrices
 
-    def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list, org_video_frames: np.ndarray):
+    def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list):
         video_frames = video_frames[: len(faces)]
         out_frames = []
         skipped_count = 0
         skip_next = False
         print(f"Restoring {len(faces)} faces...")
-        print(f"Video frames {len(org_video_frames)}")
         for index, face in enumerate(tqdm.tqdm(faces)):
             if skip_next:
                 skipped_count += 1
-                out_frames.append(org_video_frames[math.ceil(index/2)])
+                out_frames.append(video_frames[index])
                 print("Skipping frame", index, "due to previous skipped block")
                 skip_next = False
                 continue
             if affine_matrices[index] is None:
                 skipped_count += 1
-                out_frames.append(org_video_frames[math.ceil(index/2)])
+                out_frames.append(video_frames[index])
                 skip_next = True
                 print("Skipping frame", index, "no face detected")
                 continue
@@ -386,8 +385,6 @@ class LipsyncPipeline(DiffusionPipeline):
 
         audio_samples = read_audio(audio_path)
         video_frames = read_video(video_path, use_decord=False)
-        org_video_frames = read_video(video_path, use_decord=False)
-        print(f"Video frames {len(org_video_frames)}")
 
 
         video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
@@ -485,7 +482,7 @@ class LipsyncPipeline(DiffusionPipeline):
             )
             synced_video_frames.append(decoded_latents)
 
-        synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices, org_video_frames)
+        synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
 
         audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
         audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
