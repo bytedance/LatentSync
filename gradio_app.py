@@ -1,5 +1,6 @@
 import gradio as gr
 from pathlib import Path
+import argparse
 from scripts.inference import main
 from omegaconf import OmegaConf
 import argparse
@@ -86,7 +87,7 @@ def create_args(
 
 
 # Create Gradio interface
-with gr.Blocks(title="LatentSync demo") as demo:
+with gr.Blocks(title="LatentSync") as demo:
     gr.Markdown(
     """
     <h1 align="center">LatentSync</h1>
@@ -146,5 +147,20 @@ with gr.Blocks(title="LatentSync demo") as demo:
         outputs=video_output,
     )
 
+# 1. Crea il parser
+parser = argparse.ArgumentParser(description="Launch demo server.")
+
+# 2. Aggiungi gli argomenti che ti servono
+parser.add_argument('--server_port', type=int, default=7860, help='Port to run the server on')
+parser.add_argument('--share', action='store_true', help='Share the server publicly')
+parser.add_argument('--server_name', type=str, default="0.0.0.0", help='Server name to bind')
+
+# 3. Parsare gli argomenti
+args = parser.parse_args()
+
 if __name__ == "__main__":
-    demo.launch(inbrowser=True, share=True)
+    demo.launch(
+        server_port=args.server_port,
+        share=args.share,
+        server_name=args.server_name
+    )

@@ -14,6 +14,7 @@
 
 import argparse
 import os
+import gc
 from omegaconf import OmegaConf
 import torch
 from diffusers import AutoencoderKL, DDIMScheduler
@@ -21,7 +22,22 @@ from latentsync.models.unet import UNet3DConditionModel
 from latentsync.pipelines.lipsync_pipeline import LipsyncPipeline
 from accelerate.utils import set_seed
 from latentsync.whisper.audio2feature import Audio2Feature
+from DeepCache import DeepCacheSDHelper
 
+def cleanup_pipeline(pipeline):
+    try:
+        pipeline.vae.to("cpu")
+        pipeline.unet.to("cpu")
+        if hasattr(pipeline.audio_encoder, "model"):
+            pipeline.audio_encoder.model.to("cpu")
+        pipeline.scheduler = None
+        if hasattr(pipeline, "image_processor"):
+            del pipeline.image_processor
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
+
+    torch.cuda.empty_cache()
+    gc.collect()
 
 def main(config, args):
     if not os.path.exists(args.video_path):
@@ -68,16 +84,24 @@ def main(config, args):
     pipeline = LipsyncPipeline(
         vae=vae,
         audio_encoder=audio_encoder,
-        denoising_unet=denoising_unet,
+        unet=denoising_unet,
         scheduler=scheduler,
     ).to("cuda")
+
+    # use DeepCache
+    helper = DeepCacheSDHelper(pipe=pipeline)
+    helper.set_params(
+        cache_interval=3,
+        cache_branch_id=0,
+    )
+    helper.enable()
 
     if args.seed != -1:
         set_seed(args.seed)
     else:
         torch.seed()
 
-    print(f"Initial seed: {torch.initial_seed()}")
+    print(f"Initial seed2: {torch.initial_seed()}")
 
     pipeline(
         video_path=args.video_path,
@@ -92,6 +116,12 @@ def main(config, args):
         height=config.data.resolution,
         mask_image_path=config.data.mask_image_path,
     )
+    
+    print("Cleaning up pipeline...")
+    helper.disable()
+    cleanup_pipeline(pipeline)
+    del pipeline
+
 
 
 if __name__ == "__main__":
