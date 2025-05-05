@@ -271,6 +271,7 @@ class LipsyncPipeline(DiffusionPipeline):
         skipped_count = 0
         skip_next = False
         print(f"Restoring {len(faces)} faces...")
+        print(f"Video frames {len(org_video_frames)}")
         for index, face in enumerate(tqdm.tqdm(faces)):
             if skip_next:
                 skipped_count += 1
@@ -386,6 +387,7 @@ class LipsyncPipeline(DiffusionPipeline):
         audio_samples = read_audio(audio_path)
         video_frames = read_video(video_path, use_decord=False)
         org_video_frames = read_video(video_path, use_decord=False)
+        print(f"Video frames {len(org_video_frames)}")
 
 
         video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
