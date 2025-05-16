@@ -55,8 +55,16 @@ class ImageProcessor:
         if self.face_detector is None:
             raise NotImplementedError("Using the CPU for face detection is not supported")
         bbox, landmark_2d_106 = self.face_detector(image)
-        if bbox is None:
-            raise RuntimeError("Face not detected")
+        # if bbox is None:
+        #     raise RuntimeError("Face not detected")
+        if bbox is None or landmark_2d_106 is None:
+                # print("Warning: Face not detected. Using placeholder.") # Log opzionale
+                placeholder = torch.full(
+                    (3, self.resolution, self.resolution),
+                    127.0, # Grigio medio
+                    dtype=torch.float32, # Usa float qui, verrà convertito dopo se necessario
+                )
+                return placeholder, None, None
 
         pt_left_eye = np.mean(landmark_2d_106[[43, 48, 49, 51, 50]], axis=0)  # left eyebrow center
         pt_right_eye = np.mean(landmark_2d_106[101:106], axis=0)  # right eyebrow center
