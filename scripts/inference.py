@@ -21,6 +21,7 @@ from latentsync.models.unet import UNet3DConditionModel
 from latentsync.pipelines.lipsync_pipeline import LipsyncPipeline
 from accelerate.utils import set_seed
 from latentsync.whisper.audio2feature import Audio2Feature
+from DeepCache import DeepCacheSDHelper
 
 
 def main(config, args):
@@ -68,9 +69,17 @@ def main(config, args):
     pipeline = LipsyncPipeline(
         vae=vae,
         audio_encoder=audio_encoder,
-        denoising_unet=denoising_unet,
+        unet=denoising_unet,
         scheduler=scheduler,
     ).to("cuda")
+
+    # use DeepCache
+    helper = DeepCacheSDHelper(pipe=pipeline)
+    helper.set_params(
+        cache_interval=3,
+        cache_branch_id=0,
+    )
+    helper.enable()
 
     if args.seed != -1:
         set_seed(args.seed)
