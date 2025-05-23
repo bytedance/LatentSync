@@ -22,20 +22,28 @@ class Predictor(BasePredictor):
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
         # Download the model weights
-        if not os.path.exists(MODEL_CACHE):
-            download_weights(MODEL_URL, MODEL_CACHE)
+        download_weights(MODEL_URL, MODEL_CACHE)
 
         # Soft links for the auxiliary models
         os.system("mkdir -p ~/.cache/torch/hub/checkpoints")
-        os.system(
-            "ln -s $(pwd)/checkpoints/auxiliary/2DFAN4-cd938726ad.zip ~/.cache/torch/hub/checkpoints/2DFAN4-cd938726ad.zip"
-        )
-        os.system(
-            "ln -s $(pwd)/checkpoints/auxiliary/s3fd-619a316812.pth ~/.cache/torch/hub/checkpoints/s3fd-619a316812.pth"
-        )
-        os.system(
-            "ln -s $(pwd)/checkpoints/auxiliary/vgg16-397923af.pth ~/.cache/torch/hub/checkpoints/vgg16-397923af.pth"
-        )
+        
+        link_path_1 = os.path.expanduser("~/.cache/torch/hub/checkpoints/2DFAN4-cd938726ad.zip")
+        if not os.path.exists(link_path_1):
+            os.system(
+                "ln -s $(pwd)/checkpoints/auxiliary/2DFAN4-cd938726ad.zip ~/.cache/torch/hub/checkpoints/2DFAN4-cd938726ad.zip"
+            )
+        
+        link_path_2 = os.path.expanduser("~/.cache/torch/hub/checkpoints/s3fd-619a316812.pth")
+        if not os.path.exists(link_path_2):
+            os.system(
+                "ln -s $(pwd)/checkpoints/auxiliary/s3fd-619a316812.pth ~/.cache/torch/hub/checkpoints/s3fd-619a316812.pth"
+            )
+            
+        link_path_3 = os.path.expanduser("~/.cache/torch/hub/checkpoints/vgg16-397923af.pth")
+        if not os.path.exists(link_path_3):
+            os.system(
+                "ln -s $(pwd)/checkpoints/auxiliary/vgg16-397923af.pth ~/.cache/torch/hub/checkpoints/vgg16-397923af.pth"
+            )
 
     def predict(
         self,
@@ -57,7 +65,16 @@ class Predictor(BasePredictor):
         output_path = "/tmp/video_out.mp4"
 
         # Run the following command:
-        os.system(
-            f"python -m scripts.inference --unet_config_path {config_path} --inference_ckpt_path {ckpt_path} --guidance_scale {str(guidance_scale)} --video_path {video_path} --audio_path {audio_path} --video_out_path {output_path} --seed {seed} --inference_steps {inference_steps}"
-        )
+        command = [
+            "python", "-m", "scripts.inference",
+            "--unet_config_path", config_path,
+            "--inference_ckpt_path", ckpt_path,
+            "--guidance_scale", str(guidance_scale),
+            "--video_path", video_path,
+            "--audio_path", audio_path,
+            "--video_out_path", output_path,
+            "--seed", str(seed),
+            "--inference_steps", str(inference_steps)
+        ]
+        subprocess.check_call(command)
         return Path(output_path)
