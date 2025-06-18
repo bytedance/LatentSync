@@ -84,7 +84,7 @@ def create_args(
             "--seed",
             str(seed),
             "--temp_dir",
-            "--temp",
+            "temp",
             "--enable_deepcache",
         ]
     )
