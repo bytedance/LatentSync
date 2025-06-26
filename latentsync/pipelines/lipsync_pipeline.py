@@ -4,7 +4,7 @@ import inspect
 import math
 import os
 import shutil
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Union, Tuple
 import subprocess
 
 import numpy as np
@@ -15,17 +15,17 @@ from torchvision import transforms
 from packaging import version
 
 from diffusers.configuration_utils import FrozenDict
-from diffusers.models import AutoencoderKL
-from diffusers.pipelines import DiffusionPipeline
-from diffusers.schedulers import (
-    DDIMScheduler,
-    DPMSolverMultistepScheduler,
-    EulerAncestralDiscreteScheduler,
-    EulerDiscreteScheduler,
-    LMSDiscreteScheduler,
-    PNDMScheduler,
+from diffusers.models import AutoencoderKL  # type: ignore
+from diffusers.pipelines import DiffusionPipeline  # type: ignore
+from diffusers.schedulers import (  # type: ignore
+    DDIMScheduler,  # type: ignore
+    DPMSolverMultistepScheduler,  # type: ignore
+    EulerAncestralDiscreteScheduler,  # type: ignore
+    EulerDiscreteScheduler,  # type: ignore
+    LMSDiscreteScheduler,  # type: ignore
+    PNDMScheduler,  # type: ignore
 )
-from diffusers.utils import deprecate, logging
+from diffusers.utils import deprecate, logging  # type: ignore
 
 from einops import rearrange
 import cv2
@@ -37,7 +37,402 @@ from ..whisper.audio2feature import Audio2Feature
 import tqdm
 import soundfile as sf
 
+from b10util.perf import time_block
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+
+def prepare_unet_input(
+    latents: torch.Tensor,
+    mask_latents: torch.Tensor,
+    masked_image_latents: torch.Tensor,
+    ref_latents: torch.Tensor,
+    timestep: torch.Tensor,
+    scheduler,
+    do_classifier_free_guidance: bool
+) -> torch.Tensor:
+    """Prepare the input tensor for the UNet model.
+    
+    Args:
+        latents: Current noisy latents being denoised, shape (batch, channels, frames, height, width)
+        mask_latents: Latent representation of the mask indicating which regions to modify, 
+                     shape (batch, channels, frames, height, width)
+        masked_image_latents: Latent representation of the masked reference image,
+                            shape (batch, channels, frames, height, width)
+        ref_latents: Latent representation of the reference image (unmasked),
+                    shape (batch, channels, frames, height, width)
+        timestep: Current diffusion timestep, scalar tensor indicating noise level
+        scheduler: Diffusion scheduler object that handles noise scaling and timestep management
+        do_classifier_free_guidance: Whether to duplicate inputs for classifier-free guidance
+                                    (unconditional + conditional generation)
+    
+    Returns:
+        Prepared UNet input tensor with all components concatenated along channel dimension
+    """
+    # expand the latents if we are doing classifier free guidance
+    unet_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+    
+    # scale the input according to the scheduler
+    unet_input = scheduler.scale_model_input(unet_input, timestep)
+    
+    # concat latents, mask, masked_image_latents in the channel dimension
+    unet_input = torch.cat([unet_input, mask_latents, masked_image_latents, ref_latents], dim=1)
+    
+    return unet_input
+
+
+def predict_noise(
+    unet,
+    unet_input: torch.Tensor,
+    timestep: torch.Tensor,
+    audio_embeds: Optional[torch.Tensor] = None
+) -> torch.Tensor:
+    """Run the UNet forward pass to predict noise.
+    
+    Args:
+        unet: The UNet model that predicts noise to be removed from the latents
+        unet_input: Prepared input tensor containing latents, masks, and reference images,
+                   shape (batch, channels, frames, height, width)
+        timestep: Current diffusion timestep, scalar tensor indicating noise level
+        audio_embeds: Optional audio embeddings for conditioning the generation,
+                     shape (batch, sequence_length, embedding_dim). If None, unconditional generation.
+    
+    Returns:
+        Predicted noise tensor with same shape as input latents
+    """
+
+    enable_cuda_graph = False
+
+    if enable_cuda_graph:
+        if not hasattr(predict_noise, "cuda_graph") or audio_embeds.shape != predict_noise.input_audio_embeds.shape or unet_input.shape != predict_noise.input_tensor.shape or timestep.shape != predict_noise.timestep.shape:
+            predict_noise.cuda_graph = torch.cuda.CUDAGraph()
+            predict_noise.input_tensor = torch.zeros_like(unet_input)
+            predict_noise.timestep = torch.zeros_like(timestep)
+            predict_noise.input_audio_embeds = torch.zeros_like(audio_embeds)
+            predict_noise.output_tensor = unet(predict_noise.input_tensor, predict_noise.timestep, encoder_hidden_states=predict_noise.input_audio_embeds).sample
+            with torch.cuda.graph(predict_noise.cuda_graph):
+                predict_noise.input_tensor.copy_(unet_input)
+                predict_noise.input_audio_embeds.copy_(audio_embeds)
+                predict_noise.output_tensor.copy_(unet(predict_noise.input_tensor, timestep, encoder_hidden_states=predict_noise.input_audio_embeds).sample)
+        predict_noise.input_tensor.copy_(unet_input)
+        predict_noise.input_audio_embeds.copy_(audio_embeds)
+        predict_noise.timestep.copy_(timestep)
+        predict_noise.cuda_graph.replay()
+    else:
+        predict_noise.output_tensor = unet(unet_input, timestep, encoder_hidden_states=audio_embeds).sample
+
+    return predict_noise.output_tensor
+
+
+def apply_guidance(
+    noise_pred: torch.Tensor,
+    guidance_scale: float,
+    do_classifier_free_guidance: bool
+) -> torch.Tensor:
+    """Apply classifier-free guidance to the noise prediction.
+    
+    Args:
+        noise_pred: Raw noise prediction from UNet. If classifier-free guidance is used,
+                   contains both unconditional and conditional predictions concatenated
+        guidance_scale: Strength of classifier-free guidance. Higher values (>1.0) make
+                       the model follow the conditioning more strongly. 1.0 = no guidance.
+        do_classifier_free_guidance: Whether classifier-free guidance is being used.
+                                    If True, noise_pred contains both unconditional and conditional predictions.
+    
+    Returns:
+        Final noise prediction after applying guidance
+    """
+    if do_classifier_free_guidance:
+        noise_pred_uncond, noise_pred_audio = noise_pred.chunk(2)
+        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_audio - noise_pred_uncond)
+    return noise_pred
+
+
+@torch.compile()
+def perform_denoising_step(
+    scheduler,
+    latents: torch.Tensor,
+    noise_pred: torch.Tensor,
+    timestep: torch.Tensor,
+    extra_step_kwargs: dict
+) -> torch.Tensor:
+    """Perform a single denoising step using the scheduler.
+    
+    Args:
+        scheduler: Diffusion scheduler that manages the denoising process (DDIM, Euler, etc.)
+        latents: Current noisy latents being denoised, shape (batch, channels, frames, height, width)
+        noise_pred: Predicted noise to be removed from the latents
+        timestep: Current diffusion timestep, scalar tensor
+        extra_step_kwargs: Additional arguments for the scheduler step (e.g., eta for DDIM,
+                          generator for reproducibility)
+    
+    Returns:
+        Denoised latents for the next timestep
+    """
+    return scheduler.step(noise_pred, timestep, latents, **extra_step_kwargs).prev_sample
+
+
+def run_single_denoising_step(
+    unet,
+    scheduler,
+    latents: torch.Tensor,
+    timestep: torch.Tensor,
+    mask_latents: torch.Tensor,
+    masked_image_latents: torch.Tensor,
+    ref_latents: torch.Tensor,
+    audio_embeds: Optional[torch.Tensor],
+    guidance_scale: float,
+    do_classifier_free_guidance: bool,
+    extra_step_kwargs: dict
+) -> torch.Tensor:
+    """Run a complete single denoising step combining all operations.
+    
+    Args:
+        unet: The UNet model for noise prediction
+        scheduler: Diffusion scheduler for managing denoising process
+        latents: Current noisy latents, shape (batch, channels, frames, height, width)
+        timestep: Current diffusion timestep, scalar tensor
+        mask_latents: Latent mask indicating regions to modify
+        masked_image_latents: Latent representation of masked reference image
+        ref_latents: Latent representation of reference image
+        audio_embeds: Optional audio conditioning embeddings, shape (batch, seq_len, embed_dim)
+        guidance_scale: Classifier-free guidance strength (>1.0 for stronger conditioning)
+        do_classifier_free_guidance: Whether to use classifier-free guidance
+        extra_step_kwargs: Additional scheduler arguments (eta, generator, etc.)
+    
+    Returns:
+        Denoised latents after one complete denoising step
+    """
+    with time_block("Inference Denoising"):
+        unet_input = prepare_unet_input(
+            latents, mask_latents, masked_image_latents, ref_latents, 
+            timestep, scheduler, do_classifier_free_guidance
+        )
+
+    with time_block("Unet Predict"):
+        # predict the noise residual
+        noise_pred = predict_noise(unet, unet_input, timestep, audio_embeds)
+
+    with time_block("Guidance"):
+        noise_pred = apply_guidance(noise_pred, guidance_scale, do_classifier_free_guidance)
+
+    with time_block("Scheduler Step"):
+        latents = perform_denoising_step(scheduler, latents, noise_pred, timestep, extra_step_kwargs)
+
+    return latents
+
+
+def run_denoising_loop(
+    unet,
+    scheduler,
+    latents: torch.Tensor,
+    timesteps: torch.Tensor,
+    mask_latents: torch.Tensor,
+    masked_image_latents: torch.Tensor,
+    ref_latents: torch.Tensor,
+    audio_embeds: Optional[torch.Tensor],
+    guidance_scale: float,
+    do_classifier_free_guidance: bool,
+    extra_step_kwargs: dict,
+    num_inference_steps: int,
+    progress_bar,
+    callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+    callback_steps: Optional[int] = 1
+) -> torch.Tensor:
+    """Run the complete denoising loop.
+    
+    Args:
+        unet: The UNet model for noise prediction
+        scheduler: Diffusion scheduler managing the denoising process
+        latents: Initial noisy latents to denoise, shape (batch, channels, frames, height, width)
+        timesteps: Sequence of timesteps for the denoising process, shape (num_inference_steps,)
+        mask_latents: Latent mask indicating which regions to modify
+        masked_image_latents: Latent representation of masked reference image
+        ref_latents: Latent representation of reference image
+        audio_embeds: Optional audio conditioning embeddings for lip-sync generation
+        guidance_scale: Classifier-free guidance strength (1.0 = no guidance, >1.0 = stronger conditioning)
+        do_classifier_free_guidance: Whether to use classifier-free guidance
+        extra_step_kwargs: Additional scheduler arguments (eta for DDIM, generator for reproducibility)
+        num_inference_steps: Total number of denoising steps to perform
+        progress_bar: Progress bar object for tracking denoising progress
+        callback: Optional callback function called after each denoising step,
+                 receives (step_index, timestep, current_latents)
+        callback_steps: How often to call the callback (every N steps)
+    
+    Returns:
+        Fully denoised latents ready for VAE decoding
+    """
+    num_warmup_steps = len(timesteps) - num_inference_steps * scheduler.order
+
+    cuda_graph = None
+    
+    latentes_input = torch.zeros_like(latents)
+    for _, t in enumerate(timesteps):
+
+        latents = run_single_denoising_step(
+            unet, scheduler, latents, t, mask_latents, masked_image_latents, ref_latents,
+            audio_embeds, guidance_scale, do_classifier_free_guidance, extra_step_kwargs
+        )
+
+    return latents
+
+
+@torch.compile()
+def prepare_inference_inputs(
+    unet,
+    image_processor,
+    whisper_chunks: List[torch.Tensor],
+    faces: torch.Tensor,
+    chunk_start: int,
+    chunk_end: int,
+    height: int,
+    width: int,
+    weight_dtype: torch.dtype,
+    device: torch.device,
+    generator: Optional[Union[torch.Generator, List[torch.Generator]]],
+    do_classifier_free_guidance: bool,
+    prepare_mask_latents_fn: Callable,
+    prepare_image_latents_fn: Callable
+) -> Tuple[Optional[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare all inputs needed for a single inference chunk.
+    
+    Args:
+        unet: The UNet model (used to check if audio conditioning is enabled)
+        image_processor: Image processor for handling face cropping, masking, and transformations
+        whisper_chunks: List of audio feature tensors from Whisper model,
+                       each tensor shape (feature_dim,) representing audio for one frame
+        faces: Tensor of face images for the current chunk, shape (chunk_size, channels, height, width)
+        chunk_start: Starting frame index for this chunk
+        chunk_end: Ending frame index for this chunk (exclusive)
+        height: Target height for generated images (must be divisible by 8)
+        width: Target width for generated images (must be divisible by 8)
+        weight_dtype: Data type for model weights and computations (float16/float32)
+        device: Device to run computations on (cuda/cpu)
+        generator: Random number generator for reproducible results
+        do_classifier_free_guidance: Whether to prepare inputs for classifier-free guidance
+        prepare_mask_latents_fn: Function to encode masks and masked images to latent space
+        prepare_image_latents_fn: Function to encode reference images to latent space
+    
+    Returns:
+        Tuple containing:
+        - audio_embeds: Audio conditioning embeddings or None if not using audio
+        - ref_pixel_values: Reference face images in pixel space
+        - masks: Binary masks indicating mouth region to modify
+        - mask_latents: Latent representation of masks
+        - masked_image_latents: Latent representation of masked reference images
+        - ref_latents: Latent representation of reference images
+    """
+    if unet.add_audio_layer:
+        audio_embeds = torch.stack(whisper_chunks[chunk_start:chunk_end])
+        audio_embeds = audio_embeds.to(device, dtype=weight_dtype)
+        if do_classifier_free_guidance:
+            null_audio_embeds = torch.zeros_like(audio_embeds)
+            audio_embeds = torch.cat([null_audio_embeds, audio_embeds])
+    else:
+        audio_embeds = None
+
+    inference_faces = faces[chunk_start:chunk_end]
+    ref_pixel_values, masked_pixel_values, masks = image_processor.prepare_masks_and_masked_images(
+        inference_faces, affine_transform=False
+    )
+
+    # Prepare mask latent variables
+    mask_latents, masked_image_latents = prepare_mask_latents_fn(
+        masks, masked_pixel_values, height, width, weight_dtype, device, generator, do_classifier_free_guidance
+    )
+
+    # Prepare image latents
+    ref_latents = prepare_image_latents_fn(
+        ref_pixel_values, device, weight_dtype, generator, do_classifier_free_guidance
+    )
+
+    return audio_embeds, ref_pixel_values, masks, mask_latents, masked_image_latents, ref_latents
+
+
+def run_inference_chunk(
+    unet,
+    scheduler,
+    vae,
+    image_processor,
+    latents: torch.Tensor,
+    whisper_chunks: List[torch.Tensor],
+    faces: torch.Tensor,
+    chunk_start: int,
+    chunk_end: int,
+    timesteps: torch.Tensor,
+    height: int,
+    width: int,
+    weight_dtype: torch.dtype,
+    device: torch.device,
+    generator: Optional[Union[torch.Generator, List[torch.Generator]]],
+    guidance_scale: float,
+    do_classifier_free_guidance: bool,
+    extra_step_kwargs: dict,
+    num_inference_steps: int,
+    progress_bar,
+    prepare_mask_latents_fn: Callable,
+    prepare_image_latents_fn: Callable,
+    decode_latents_fn: Callable,
+    paste_surrounding_pixels_back_fn: Callable,
+    callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+    callback_steps: Optional[int] = 1
+) -> torch.Tensor:
+    """Run inference for a single chunk of frames.
+    
+    Args:
+        unet: The UNet model for noise prediction
+        scheduler: Diffusion scheduler for managing denoising
+        vae: Variational autoencoder for encoding/decoding between pixel and latent space
+        image_processor: Processor for face detection, cropping, masking, and restoration
+        latents: Initial noisy latents for this chunk, shape (batch, channels, frames, height, width)
+        whisper_chunks: Audio feature tensors from Whisper model for conditioning
+        faces: Face images for this chunk, shape (chunk_size, channels, height, width)
+        chunk_start: Starting frame index for this chunk
+        chunk_end: Ending frame index for this chunk (exclusive)
+        timesteps: Diffusion timesteps for denoising, shape (num_inference_steps,)
+        height: Target height for generated images (must be divisible by 8)
+        width: Target width for generated images (must be divisible by 8)
+        weight_dtype: Data type for computations (float16 for speed, float32 for precision)
+        device: Computation device (cuda for GPU acceleration, cpu for CPU)
+        generator: Random number generator for reproducible results
+        guidance_scale: Classifier-free guidance strength (1.0 = no guidance, >1.0 = stronger conditioning)
+        do_classifier_free_guidance: Whether to use classifier-free guidance for better quality
+        extra_step_kwargs: Additional scheduler parameters (eta for DDIM, etc.)
+        num_inference_steps: Number of denoising steps (more steps = better quality, slower)
+        progress_bar: Progress tracking object
+        prepare_mask_latents_fn: Function to encode masks to latent space
+        prepare_image_latents_fn: Function to encode images to latent space
+        decode_latents_fn: Function to decode latents back to pixel space
+        paste_surrounding_pixels_back_fn: Function to restore non-mouth regions from original
+        callback: Optional callback for monitoring progress
+        callback_steps: Frequency of callback calls
+    
+    Returns:
+        Generated face images with lip-sync applied, shape (chunk_size, channels, height, width)
+    """
+    with time_block("Inference Prepare"):
+        (audio_embeds, ref_pixel_values, masks, 
+         mask_latents, masked_image_latents, ref_latents) = prepare_inference_inputs(
+            unet, image_processor, whisper_chunks, faces, chunk_start, chunk_end, height, width,
+            weight_dtype, device, generator, do_classifier_free_guidance,
+            prepare_mask_latents_fn, prepare_image_latents_fn
+        )
+
+    # Run denoising loop
+    latents = run_denoising_loop(
+        unet, scheduler, latents, timesteps, mask_latents, masked_image_latents, ref_latents,
+        audio_embeds, guidance_scale, do_classifier_free_guidance, extra_step_kwargs,
+        num_inference_steps, progress_bar, callback, callback_steps
+    )
+
+    with time_block("Decode Latents"):
+        # Recover the pixel values
+        decoded_latents = decode_latents_fn(latents)
+        decoded_latents = paste_surrounding_pixels_back_fn(
+            decoded_latents, ref_pixel_values, 1 - masks, device, weight_dtype
+        )
+
+    return decoded_latents
 
 
 class LipsyncPipeline(DiffusionPipeline):
@@ -59,10 +454,10 @@ class LipsyncPipeline(DiffusionPipeline):
     ):
         super().__init__()
 
-        if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
+        if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:  # type: ignore
             deprecation_message = (
                 f"The configuration file of this scheduler: {scheduler} is outdated. `steps_offset`"
-                f" should be set to 1 instead of {scheduler.config.steps_offset}. Please make sure "
+                f" should be set to 1 instead of {scheduler.config.steps_offset}. Please make sure "  # type: ignore
                 "to update the config accordingly as leaving `steps_offset` might led to incorrect results"
                 " in future versions. If you have downloaded this checkpoint from the Hugging Face Hub,"
                 " it would be very nice if you could open a Pull request for the `scheduler/scheduler_config.json`"
@@ -73,7 +468,7 @@ class LipsyncPipeline(DiffusionPipeline):
             new_config["steps_offset"] = 1
             scheduler._internal_dict = FrozenDict(new_config)
 
-        if hasattr(scheduler.config, "clip_sample") and scheduler.config.clip_sample is True:
+        if hasattr(scheduler.config, "clip_sample") and scheduler.config.clip_sample is True:  # type: ignore
             deprecation_message = (
                 f"The configuration file of this scheduler: {scheduler} has not set the configuration `clip_sample`."
                 " `clip_sample` should be set to False in the configuration file. Please make sure to update the"
@@ -87,9 +482,9 @@ class LipsyncPipeline(DiffusionPipeline):
             scheduler._internal_dict = FrozenDict(new_config)
 
         is_unet_version_less_0_9_0 = hasattr(unet.config, "_diffusers_version") and version.parse(
-            version.parse(unet.config._diffusers_version).base_version
+            version.parse(unet.config._diffusers_version).base_version  # type: ignore
         ) < version.parse("0.9.0.dev0")
-        is_unet_sample_size_less_64 = hasattr(unet.config, "sample_size") and unet.config.sample_size < 64
+        is_unet_sample_size_less_64 = hasattr(unet.config, "sample_size") and unet.config.sample_size < 64  # type: ignore
         if is_unet_version_less_0_9_0 and is_unet_sample_size_less_64:
             deprecation_message = (
                 "The configuration file of the unet has set the default `sample_size` to smaller than"
@@ -137,6 +532,7 @@ class LipsyncPipeline(DiffusionPipeline):
                 return torch.device(module._hf_hook.execution_device)
         return self.device
 
+    @torch.compile()
     def decode_latents(self, latents):
         latents = latents / self.vae.config.scaling_factor + self.vae.config.shift_factor
         latents = rearrange(latents, "b c f h w -> (b f) c h w")
@@ -271,7 +667,7 @@ class LipsyncPipeline(DiffusionPipeline):
             x1, y1, x2, y2 = boxes[index]
             height = int(y2 - y1)
             width = int(x2 - x1)
-            face = torchvision.transforms.functional.resize(
+            face = torchvision.transforms.functional.resize(  # type: ignore
                 face, size=(height, width), interpolation=transforms.InterpolationMode.BICUBIC, antialias=True
             )
             out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
@@ -309,6 +705,143 @@ class LipsyncPipeline(DiffusionPipeline):
 
         return video_frames, faces, boxes, affine_matrices
 
+    def prepare_unet_input(
+        self,
+        latents: torch.Tensor,
+        mask_latents: torch.Tensor,
+        masked_image_latents: torch.Tensor,
+        ref_latents: torch.Tensor,
+        timestep: torch.Tensor,
+        do_classifier_free_guidance: bool
+    ) -> torch.Tensor:
+        """Prepare the input tensor for the UNet model."""
+        return prepare_unet_input(
+            latents, mask_latents, masked_image_latents, ref_latents, 
+            timestep, self.scheduler, do_classifier_free_guidance
+        )
+
+    def predict_noise(
+        self,
+        unet_input: torch.Tensor,
+        timestep: torch.Tensor,
+        audio_embeds: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Run the UNet forward pass to predict noise."""
+        return predict_noise(self.unet, unet_input, timestep, audio_embeds)
+
+    def apply_guidance(
+        self,
+        noise_pred: torch.Tensor,
+        guidance_scale: float,
+        do_classifier_free_guidance: bool
+    ) -> torch.Tensor:
+        """Apply classifier-free guidance to the noise prediction."""
+        return apply_guidance(noise_pred, guidance_scale, do_classifier_free_guidance)
+
+    def perform_denoising_step(
+        self,
+        latents: torch.Tensor,
+        noise_pred: torch.Tensor,
+        timestep: torch.Tensor,
+        extra_step_kwargs: dict
+    ) -> torch.Tensor:
+        """Perform a single denoising step using the scheduler."""
+        return perform_denoising_step(self.scheduler, latents, noise_pred, timestep, extra_step_kwargs)
+
+    def run_single_denoising_step(
+        self,
+        latents: torch.Tensor,
+        timestep: torch.Tensor,
+        mask_latents: torch.Tensor,
+        masked_image_latents: torch.Tensor,
+        ref_latents: torch.Tensor,
+        audio_embeds: Optional[torch.Tensor],
+        guidance_scale: float,
+        do_classifier_free_guidance: bool,
+        extra_step_kwargs: dict
+    ) -> torch.Tensor:
+        """Run a complete single denoising step combining all operations."""
+        return run_single_denoising_step(
+            self.unet, self.scheduler, latents, timestep, mask_latents, masked_image_latents, ref_latents,
+            audio_embeds, guidance_scale, do_classifier_free_guidance, extra_step_kwargs
+        )
+
+    def run_denoising_loop(
+        self,
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        mask_latents: torch.Tensor,
+        masked_image_latents: torch.Tensor,
+        ref_latents: torch.Tensor,
+        audio_embeds: Optional[torch.Tensor],
+        guidance_scale: float,
+        do_classifier_free_guidance: bool,
+        extra_step_kwargs: dict,
+        num_inference_steps: int,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback_steps: Optional[int] = 1
+    ) -> torch.Tensor:
+        """Run the complete denoising loop."""
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            return run_denoising_loop(
+                self.unet, self.scheduler, latents, timesteps, mask_latents, masked_image_latents, ref_latents,
+                audio_embeds, guidance_scale, do_classifier_free_guidance, extra_step_kwargs,
+                num_inference_steps, progress_bar, callback, callback_steps
+            )
+
+    def prepare_inference_inputs(
+        self,
+        whisper_chunks: List[torch.Tensor],
+        faces: torch.Tensor,
+        chunk_start: int,
+        chunk_end: int,
+        height: int,
+        width: int,
+        weight_dtype: torch.dtype,
+        device: torch.device,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]],
+        do_classifier_free_guidance: bool
+    ) -> Tuple[Optional[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Prepare all inputs needed for a single inference chunk."""
+        return prepare_inference_inputs(
+            self.unet, self.image_processor, whisper_chunks, faces, chunk_start, chunk_end, 
+            height, width, weight_dtype, device, generator, do_classifier_free_guidance,
+            self.prepare_mask_latents, self.prepare_image_latents
+        )
+
+    def run_inference_chunk(
+        self,
+        latents: torch.Tensor,
+        whisper_chunks: List[torch.Tensor],
+        faces: torch.Tensor,
+        chunk_start: int,
+        chunk_end: int,
+        timesteps: torch.Tensor,
+        height: int,
+        width: int,
+        weight_dtype: torch.dtype,
+        device: torch.device,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]],
+        guidance_scale: float,
+        do_classifier_free_guidance: bool,
+        extra_step_kwargs: dict,
+        num_inference_steps: int,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback_steps: Optional[int] = 1
+    ) -> torch.Tensor:
+        """Run inference for a single chunk of frames."""
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            return run_inference_chunk(
+                self.unet, self.scheduler, self.vae, self.image_processor,
+                latents, whisper_chunks, faces, chunk_start, chunk_end,
+                timesteps, height, width, weight_dtype, device, generator,
+                guidance_scale, do_classifier_free_guidance, extra_step_kwargs,
+                num_inference_steps, progress_bar,
+                self.prepare_mask_latents, self.prepare_image_latents,
+                self.decode_latents, self.paste_surrounding_pixels_back,
+                callback, callback_steps
+            )
+
     @torch.no_grad()
     def __call__(
         self,
@@ -334,144 +867,90 @@ class LipsyncPipeline(DiffusionPipeline):
         is_train = self.unet.training
         self.unet.eval()
 
+        num_inference_steps = 4
+
         check_ffmpeg_installed()
 
         # 0. Define call parameters
         device = self._execution_device
-        mask_image = load_fixed_mask(height, mask_image_path)
-        self.image_processor = ImageProcessor(height, device="cuda", mask_image=mask_image)
+        mask_image = load_fixed_mask(height, mask_image_path)  # type: ignore
+        self.image_processor = ImageProcessor(height, device="cuda", mask_image=mask_image)  # type: ignore
         self.set_progress_bar_config(desc=f"Sample frames: {num_frames}")
 
-        # 1. Default height and width to unet
-        height = height or self.unet.config.sample_size * self.vae_scale_factor
-        width = width or self.unet.config.sample_size * self.vae_scale_factor
+        with time_block("Setup"):
+            # 1. Default height and width to unet
+            height = height or self.unet.config.sample_size * self.vae_scale_factor
+            width = width or self.unet.config.sample_size * self.vae_scale_factor
 
-        # 2. Check inputs
-        self.check_inputs(height, width, callback_steps)
+            # 2. Check inputs
+            self.check_inputs(height, width, callback_steps)
 
-        # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-        # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
-        # corresponds to doing no classifier free guidance.
-        do_classifier_free_guidance = guidance_scale > 1.0
+            # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
+            # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+            # corresponds to doing no classifier free guidance.
+            do_classifier_free_guidance = guidance_scale > 1.0
 
-        # 3. set timesteps
-        self.scheduler.set_timesteps(num_inference_steps, device=device)
-        timesteps = self.scheduler.timesteps
+            # 3. set timesteps
+            self.scheduler.set_timesteps(num_inference_steps, device=device)
+            timesteps = self.scheduler.timesteps
 
-        # 4. Prepare extra step kwargs.
-        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+            # 4. Prepare extra step kwargs.
+            extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
-        whisper_feature = self.audio_encoder.audio2feat(audio_path)
-        whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
+            whisper_feature = self.audio_encoder.audio2feat(audio_path)
+            whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
 
-        audio_samples = read_audio(audio_path)
-        video_frames = read_video(video_path, use_decord=False)
+            audio_samples = read_audio(audio_path)
+            video_frames = read_video(video_path, use_decord=False)
 
-        video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
+            video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
 
-        synced_video_frames = []
+            synced_video_frames = []
 
-        num_channels_latents = self.vae.config.latent_channels
+            num_channels_latents = self.vae.config.latent_channels
 
-        # Prepare latent variables
-        all_latents = self.prepare_latents(
-            len(whisper_chunks),
-            num_channels_latents,
-            height,
-            width,
-            weight_dtype,
-            device,
-            generator,
-        )
-
-        num_inferences = math.ceil(len(whisper_chunks) / num_frames)
-        for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
-            if self.unet.add_audio_layer:
-                audio_embeds = torch.stack(whisper_chunks[i * num_frames : (i + 1) * num_frames])
-                audio_embeds = audio_embeds.to(device, dtype=weight_dtype)
-                if do_classifier_free_guidance:
-                    null_audio_embeds = torch.zeros_like(audio_embeds)
-                    audio_embeds = torch.cat([null_audio_embeds, audio_embeds])
-            else:
-                audio_embeds = None
-            inference_faces = faces[i * num_frames : (i + 1) * num_frames]
-            latents = all_latents[:, :, i * num_frames : (i + 1) * num_frames]
-            ref_pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images(
-                inference_faces, affine_transform=False
-            )
-
-            # 7. Prepare mask latent variables
-            mask_latents, masked_image_latents = self.prepare_mask_latents(
-                masks,
-                masked_pixel_values,
+            # Prepare latent variables
+            all_latents = self.prepare_latents(
+                len(whisper_chunks),
+                num_channels_latents,
                 height,
                 width,
                 weight_dtype,
                 device,
                 generator,
-                do_classifier_free_guidance,
             )
 
-            # 8. Prepare image latents
-            ref_latents = self.prepare_image_latents(
-                ref_pixel_values,
-                device,
-                weight_dtype,
-                generator,
-                do_classifier_free_guidance,
+        num_inferences = math.ceil(len(whisper_chunks) / num_frames)
+        for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
+            chunk_start = i * num_frames
+            chunk_end = (i + 1) * num_frames
+            latents = all_latents[:, :, chunk_start:chunk_end]
+
+            decoded_latents = self.run_inference_chunk(
+                latents, whisper_chunks, faces, chunk_start, chunk_end,
+                timesteps, height, width, weight_dtype, device, generator,  # type: ignore
+                guidance_scale, do_classifier_free_guidance, extra_step_kwargs,
+                num_inference_steps, callback, callback_steps
             )
 
-            # 9. Denoising loop
-            num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-            with self.progress_bar(total=num_inference_steps) as progress_bar:
-                for j, t in enumerate(timesteps):
-                    # expand the latents if we are doing classifier free guidance
-                    unet_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-
-                    unet_input = self.scheduler.scale_model_input(unet_input, t)
-
-                    # concat latents, mask, masked_image_latents in the channel dimension
-                    unet_input = torch.cat([unet_input, mask_latents, masked_image_latents, ref_latents], dim=1)
-
-                    # predict the noise residual
-                    noise_pred = self.unet(unet_input, t, encoder_hidden_states=audio_embeds).sample
-
-                    # perform guidance
-                    if do_classifier_free_guidance:
-                        noise_pred_uncond, noise_pred_audio = noise_pred.chunk(2)
-                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_audio - noise_pred_uncond)
-
-                    # compute the previous noisy sample x_t -> x_t-1
-                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
-
-                    # call the callback, if provided
-                    if j == len(timesteps) - 1 or ((j + 1) > num_warmup_steps and (j + 1) % self.scheduler.order == 0):
-                        progress_bar.update()
-                        if callback is not None and j % callback_steps == 0:
-                            callback(j, t, latents)
-
-            # Recover the pixel values
-            decoded_latents = self.decode_latents(latents)
-            decoded_latents = self.paste_surrounding_pixels_back(
-                decoded_latents, ref_pixel_values, 1 - masks, device, weight_dtype
-            )
             synced_video_frames.append(decoded_latents)
 
-        synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
+        with time_block("Restore Video"):
+            synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
 
-        audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
-        audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
+            audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
+            audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
 
-        if is_train:
-            self.unet.train()
+            if is_train:
+                self.unet.train()
 
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        os.makedirs(temp_dir, exist_ok=True)
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+            os.makedirs(temp_dir, exist_ok=True)
 
-        write_video(os.path.join(temp_dir, "video.mp4"), synced_video_frames, fps=video_fps)
+            write_video(os.path.join(temp_dir, "video.mp4"), synced_video_frames, fps=video_fps)
 
-        sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
+            sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
 
-        command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
-        subprocess.run(command, shell=True)
+            command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
+            subprocess.run(command, shell=True)

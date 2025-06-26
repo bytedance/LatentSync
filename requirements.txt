@@ -1,8 +1,8 @@
-torch==2.5.1
-torchvision==0.20.1
+torch==2.7.1
+torchvision==0.22.1
 --extra-index-url https://download.pytorch.org/whl/cu121
-diffusers==0.32.2
-transformers==4.48.0
+diffusers==0.34.0
+transformers==4.52.4
 decord==0.6.0
 accelerate==0.26.1
 einops==0.7.0

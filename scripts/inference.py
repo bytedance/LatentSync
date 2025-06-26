@@ -23,6 +23,8 @@ from accelerate.utils import set_seed
 from latentsync.whisper.audio2feature import Audio2Feature
 from DeepCache import DeepCacheSDHelper
 
+from torch.profiler import profile, record_function, ProfilerActivity
+
 
 def main(config, args):
     if not os.path.exists(args.video_path):
@@ -61,7 +63,7 @@ def main(config, args):
     unet, _ = UNet3DConditionModel.from_pretrained(
         OmegaConf.to_container(config.model),
         args.inference_ckpt_path,
-        device="cpu",
+        device="cuda",
     )
 
     unet = unet.to(dtype=dtype)
@@ -86,19 +88,23 @@ def main(config, args):
 
     print(f"Initial seed: {torch.initial_seed()}")
 
-    pipeline(
-        video_path=args.video_path,
-        audio_path=args.audio_path,
-        video_out_path=args.video_out_path,
-        num_frames=config.data.num_frames,
-        num_inference_steps=args.inference_steps,
-        guidance_scale=args.guidance_scale,
-        weight_dtype=dtype,
-        width=config.data.resolution,
-        height=config.data.resolution,
-        mask_image_path=config.data.mask_image_path,
-        temp_dir=args.temp_dir,
-    )
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        with record_function("pipeline"):
+            pipeline(
+                video_path=args.video_path,
+                audio_path=args.audio_path,
+                video_out_path=args.video_out_path,
+                num_frames=config.data.num_frames,
+                num_inference_steps=args.inference_steps,
+                guidance_scale=args.guidance_scale,
+                weight_dtype=dtype,
+                width=config.data.resolution,
+                height=config.data.resolution,
+                mask_image_path=config.data.mask_image_path,
+                temp_dir=args.temp_dir,
+            )
+    print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
+    prof.export_chrome_trace("trace.json")
 
 
 if __name__ == "__main__":

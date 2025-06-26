@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 import copy
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 
 import torch
 import torch.nn as nn
@@ -309,6 +311,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         if isinstance(module, (CrossAttnDownBlock3D, DownBlock3D, CrossAttnUpBlock3D, UpBlock3D)):
             module.gradient_checkpointing = value
 
+    @torch.compile()
     def forward(
         self,
         sample: torch.FloatTensor,
