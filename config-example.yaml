@@ -1,0 +1,6 @@
+server_name: "0.0.0.0"
+server_port: 8080
+public_share: true
+auth:
+  - "admin"
+  - "password"

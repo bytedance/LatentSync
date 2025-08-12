@@ -50,3 +50,4 @@ wandb/
 !/docs/*
 !/internal/*.png
 .cog/
+config.yaml
