@@ -11,7 +11,7 @@ audio_encoder: # input (1, 80, 52)
   dropout: 0.0
 ```
 
-The above model arch accept a `1 x 80 x 52` image (mel spectrogram) and output a `2048 x 1 x 1` feature map. If the resolution of input image changes, you need to redefine the `downsample_factors` to make the output looks like `D x 1 x 1`, so that it can be used to compute cosine similarity.  Also reset the `block_out_channels`, in most cases, deeper networks require larger numbers of channels to store more features. We recommend reading the paper [EfficientNet](https://arxiv.org/abs/1905.11946), which discusses how to set the depth and width of CNN networks balancely. The `attn_blocks` defines whether a certain layer has a self-attention layer, where 1 indicates presence and 0 indicates absence. 
+The above model architecture accepts a `1 x 80 x 52` image (mel spectrogram) and outputs a `2048 x 1 x 1` feature map. If the resolution of input image changes, you need to redefine the `downsample_factors` to make the output looks like `D x 1 x 1`, so that it can be used to compute cosine similarity.  Also reset the `block_out_channels`, in most cases, deeper networks require larger numbers of channels to store more features. We recommend reading the paper [EfficientNet](https://arxiv.org/abs/1905.11946), which discusses how to set the depth and width of CNN networks balancely. The `attn_blocks` defines whether a certain layer has a self-attention layer, where 1 indicates presence and 0 indicates absence. 
 
 Now we look at an example of a visual encoder:
 
