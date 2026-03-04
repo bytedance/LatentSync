@@ -10,7 +10,7 @@ class FaceDetector:
         self.app = FaceAnalysis(
             allowed_modules=["detection", "landmark_2d_106"],
             root="checkpoints/auxiliary",
-            providers=["CUDAExecutionProvider"],
+            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
         )
         self.app.prepare(ctx_id=cuda_to_int(device), det_size=(INSIGHTFACE_DETECT_SIZE, INSIGHTFACE_DETECT_SIZE))
 
@@ -69,16 +69,20 @@ class FaceDetector:
             return (x1, y1, x2, y2), lmk
 
 
-def cuda_to_int(cuda_str: str) -> int:
+def cuda_to_int(cuda_str) -> int:
     """
-    Convert the string with format "cuda:X" to integer X.
+    Convert device to integer context ID. MPS/CPU → -1 (CPU).
     """
+    if isinstance(cuda_str, torch.device):
+        if cuda_str.type == "cuda":
+            return cuda_str.index or 0
+        return -1  # MPS/CPU → ONNX CPU
     if cuda_str == "cuda":
         return 0
     device = torch.device(cuda_str)
     if device.type != "cuda":
-        raise ValueError(f"Device type must be 'cuda', got: {device.type}")
-    return device.index
+        return -1
+    return device.index or 0
 
 
 LMK_ADAPT_ORIGIN_ORDER = [
