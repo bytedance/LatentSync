@@ -35,7 +35,7 @@ class Predictor(BasePredictor):
         self,
         video: Path = Input(description="Input video", default=None),
         audio: Path = Input(description="Input audio to ", default=None),
-        guidance_scale: float = Input(description="Guidance scale", ge=1, le=3, default=2.0),
+        guidance_scale: float = Input(description="Guidance scale", ge=1, le=3, default=1.7),
         inference_steps: int = Input(description="Inference steps", ge=20, le=50, default=20),
         seed: int = Input(description="Set to 0 for Random seed", default=0),
     ) -> Path:

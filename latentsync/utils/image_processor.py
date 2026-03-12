@@ -27,6 +27,7 @@ def load_fixed_mask(resolution: int, mask_image_path="latentsync/utils/mask.png"
     mask_image = cv2.imread(mask_image_path)
     mask_image = cv2.cvtColor(mask_image, cv2.COLOR_BGR2RGB)
     mask_image = cv2.resize(mask_image, (resolution, resolution), interpolation=cv2.INTER_LANCZOS4) / 255.0
+    mask_image = np.clip(mask_image, 0, 1)
     mask_image = rearrange(torch.from_numpy(mask_image), "h w c -> c h w")
     return mask_image
 

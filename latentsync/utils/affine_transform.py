@@ -91,8 +91,11 @@ class AlignRestore(object):
         inv_soft_mask_3d = inv_soft_mask.expand_as(inv_face)
         img_back = inv_soft_mask_3d * pasted_face + (1 - inv_soft_mask_3d) * input_img
 
+        # Clamp values to valid range before converting to uint8 to prevent white dot artifacts
+        img_back = img_back.clamp(0, 255)
         img_back = rearrange(img_back, "c h w -> h w c").contiguous().to(dtype=torch.uint8)
         img_back = img_back.cpu().numpy()
+        
         return img_back
 
     def transformation_from_points(self, points1: torch.Tensor, points0: torch.Tensor, smooth=True, p_bias=None):
@@ -138,7 +141,7 @@ class AlignRestore(object):
             if p_bias is None:
                 p_bias = bias
             else:
-                bias = p_bias * 0.2 + bias * 0.8
+                bias = p_bias * 0.5 + bias * 0.5
             p_bias = bias
             M[:, 2] = M[:, 2] + bias
 

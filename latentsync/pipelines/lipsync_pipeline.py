@@ -29,6 +29,7 @@ from diffusers.utils import deprecate, logging
 
 from einops import rearrange
 import cv2
+import kornia
 
 from ..models.unet import UNet3DConditionModel
 from ..utils.util import read_video, read_audio, write_video, check_ffmpeg_installed
@@ -44,18 +45,18 @@ class LipsyncPipeline(DiffusionPipeline):
     _optional_components = []
 
     def __init__(
-        self,
-        vae: AutoencoderKL,
-        audio_encoder: Audio2Feature,
-        unet: UNet3DConditionModel,
-        scheduler: Union[
-            DDIMScheduler,
-            PNDMScheduler,
-            LMSDiscreteScheduler,
-            EulerDiscreteScheduler,
-            EulerAncestralDiscreteScheduler,
-            DPMSolverMultistepScheduler,
-        ],
+            self,
+            vae: AutoencoderKL,
+            audio_encoder: Audio2Feature,
+            unet: UNet3DConditionModel,
+            scheduler: Union[
+                DDIMScheduler,
+                PNDMScheduler,
+                LMSDiscreteScheduler,
+                EulerDiscreteScheduler,
+                EulerAncestralDiscreteScheduler,
+                DPMSolverMultistepScheduler,
+            ],
     ):
         super().__init__()
 
@@ -130,9 +131,9 @@ class LipsyncPipeline(DiffusionPipeline):
             return self.device
         for module in self.unet.modules():
             if (
-                hasattr(module, "_hf_hook")
-                and hasattr(module._hf_hook, "execution_device")
-                and module._hf_hook.execution_device is not None
+                    hasattr(module, "_hf_hook")
+                    and hasattr(module._hf_hook, "execution_device")
+                    and module._hf_hook.execution_device is not None
             ):
                 return torch.device(module._hf_hook.execution_device)
         return self.device
@@ -167,7 +168,7 @@ class LipsyncPipeline(DiffusionPipeline):
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
         if (callback_steps is None) or (
-            callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
+                callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
         ):
             raise ValueError(
                 f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
@@ -191,7 +192,7 @@ class LipsyncPipeline(DiffusionPipeline):
         return latents
 
     def prepare_mask_latents(
-        self, mask, masked_image, height, width, dtype, device, generator, do_classifier_free_guidance
+            self, mask, masked_image, height, width, dtype, device, generator, do_classifier_free_guidance
     ):
         # resize the mask to latents shape as we concatenate the mask to the latents
         # we do that before converting to dtype to avoid breaking in case we're using cpu_offload
@@ -311,25 +312,26 @@ class LipsyncPipeline(DiffusionPipeline):
 
     @torch.no_grad()
     def __call__(
-        self,
-        video_path: str,
-        audio_path: str,
-        video_out_path: str,
-        num_frames: int = 16,
-        video_fps: int = 25,
-        audio_sample_rate: int = 16000,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        num_inference_steps: int = 20,
-        guidance_scale: float = 1.5,
-        weight_dtype: Optional[torch.dtype] = torch.float16,
-        eta: float = 0.0,
-        mask_image_path: str = "latentsync/utils/mask.png",
-        temp_dir: str = "temp",
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
-        callback_steps: Optional[int] = 1,
-        **kwargs,
+            self,
+            video_path: str,
+            audio_path: str,
+            video_out_path: str,
+            num_frames: int = 16,
+            video_fps: int = 25,
+            audio_sample_rate: int = 16000,
+            height: Optional[int] = None,
+            width: Optional[int] = None,
+            num_inference_steps: int = 30,
+            guidance_scale: float = 1.7,
+            weight_dtype: Optional[torch.dtype] = torch.float16,
+            eta: float = 0.0,
+            mask_image_path: str = "latentsync/utils/mask.png",
+            temp_dir: str = "temp",
+            generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+            callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+            callback_steps: Optional[int] = 1,
+            skip_merge_audio: bool = False,
+            **kwargs,
     ):
         is_train = self.unet.training
         self.unet.eval()
@@ -365,9 +367,20 @@ class LipsyncPipeline(DiffusionPipeline):
         whisper_chunks = self.audio_encoder.feature2chunks(feature_array=whisper_feature, fps=video_fps)
 
         audio_samples = read_audio(audio_path)
-        video_frames = read_video(video_path, use_decord=False)
+        video_frames = read_video(video_path=video_path, use_decord=False, change_fps=False,)
 
         video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
+
+        original_num_chunks = len(whisper_chunks)
+        remainder = original_num_chunks % num_frames
+        if remainder != 0:
+            pad_count = num_frames - remainder
+            for _ in range(pad_count):
+                whisper_chunks.append(whisper_chunks[-1])
+            faces = torch.cat([faces, faces[-1:].repeat(pad_count, 1, 1, 1)], dim=0)
+            video_frames = np.concatenate([video_frames, np.stack([video_frames[-1]] * pad_count)], axis=0)
+            boxes = boxes + [boxes[-1]] * pad_count
+            affine_matrices = affine_matrices + [affine_matrices[-1]] * pad_count
 
         synced_video_frames = []
 
@@ -452,12 +465,15 @@ class LipsyncPipeline(DiffusionPipeline):
 
             # Recover the pixel values
             decoded_latents = self.decode_latents(latents)
+
             decoded_latents = self.paste_surrounding_pixels_back(
                 decoded_latents, ref_pixel_values, 1 - masks, device, weight_dtype
             )
             synced_video_frames.append(decoded_latents)
 
         synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
+
+        synced_video_frames = synced_video_frames[:original_num_chunks]
 
         audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
         audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
@@ -469,9 +485,16 @@ class LipsyncPipeline(DiffusionPipeline):
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir, exist_ok=True)
 
-        write_video(os.path.join(temp_dir, "video.mp4"), synced_video_frames, fps=video_fps)
+        if not skip_merge_audio:
+            write_video(os.path.join(temp_dir, "video.mp4"), synced_video_frames, fps=video_fps)
 
-        sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
+            sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
 
-        command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
-        subprocess.run(command, shell=True)
+            command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 15 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
+            subprocess.run(command, shell=True)
+        else:
+            write_video(video_out_path, synced_video_frames, fps=video_fps)
+
+            sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
+
+        return

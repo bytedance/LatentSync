@@ -12,10 +12,10 @@ data:
   num_workers: 12 # 12
   num_frames: 16
   resolution: 512
-  mask_image_path: latentsync/utils/mask.png
+  mask_image_path: latentsync/utils/mask3.png
   audio_sample_rate: 16000
   video_fps: 25
-  audio_feat_length: [2, 2]
+  audio_feat_length: [3, 3]
 
 ckpt:
   resume_ckpt_path: checkpoints/latentsync_unet.pt

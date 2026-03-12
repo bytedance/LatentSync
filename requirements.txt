@@ -1,14 +1,14 @@
-torch==2.5.1
-torchvision==0.20.1
+torch==2.8.0
+torchaudio==2.8.0
+torchvision==0.23.0
 --extra-index-url https://download.pytorch.org/whl/cu121
-diffusers==0.32.2
-transformers==4.48.0
-decord==0.6.0
+diffusers==0.35.2
+transformers==4.53.0
 accelerate==0.26.1
 einops==0.7.0
 omegaconf==2.3.0
 opencv-python==4.9.0.80
-mediapipe==0.10.11
+mediapipe==0.10.13
 python_speech_features==0.6
 librosa==0.10.1
 scenedetect==0.6.1
@@ -18,7 +18,7 @@ imageio-ffmpeg==0.5.1
 lpips==0.1.4
 face-alignment==1.4.1
 gradio==5.24.0
-huggingface-hub==0.30.2
+huggingface-hub==0.34.2
 numpy==1.26.4
 kornia==0.8.0
 insightface==0.7.3

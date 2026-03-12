@@ -93,12 +93,13 @@ class Audio2Feature:
 
         while True:
             start_idx = int(i * whisper_idx_multiplier)
+            # Check boundary BEFORE appending to avoid generating extra frames
+            if start_idx >= len(feature_array):
+                break
             selected_feature, selected_idx = self.get_sliced_feature(feature_array=feature_array, vid_idx=i, fps=fps)
             # print(f"i:{i},selected_idx {selected_idx}")
             whisper_chunks.append(selected_feature)
             i += 1
-            if start_idx > len(feature_array):
-                break
 
         return whisper_chunks
 
@@ -160,8 +161,9 @@ if __name__ == "__main__":
     print(f"video in {fps} FPS, audio idx in 50FPS")
     while True:
         start_idx = int(i * whisper_idx_multiplier)
+        # Check boundary BEFORE processing to avoid generating extra frames
+        if start_idx >= len(array):
+            break
         selected_feature, selected_idx = audio_encoder.get_sliced_feature(feature_array=array, vid_idx=i, fps=fps)
         print(f"video idx {i},\t audio idx {selected_idx},\t shape {selected_feature.shape}")
         i += 1
-        if start_idx > len(array):
-            break

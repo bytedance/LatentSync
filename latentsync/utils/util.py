@@ -28,7 +28,6 @@ from torchvision import transforms
 
 from einops import rearrange
 import cv2
-from decord import AudioReader, VideoReader
 import shutil
 import subprocess
 
@@ -64,6 +63,7 @@ def read_video(video_path: str, change_fps=True, use_decord=True):
 
 
 def read_video_decord(video_path: str):
+    from decord import VideoReader
     vr = VideoReader(video_path)
     video_frames = vr[:].asnumpy()
     vr.seek(0)
@@ -103,6 +103,8 @@ def read_video_cv2(video_path: str):
 def read_audio(audio_path: str, audio_sample_rate: int = 16000):
     if audio_path is None:
         raise ValueError("Audio path is required.")
+
+    from decord import AudioReader
     ar = AudioReader(audio_path, sample_rate=audio_sample_rate, mono=True)
 
     # To access the audio samples

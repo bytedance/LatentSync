@@ -27,9 +27,9 @@ run:
   sync_loss_weight: 0.05
   perceptual_loss_weight: 0.1 # 0.1
   recon_loss_weight: 1 # 1
-  guidance_scale: 1.5 # [1.0 - 3.0]
+  guidance_scale: 1.7 # [1.0 - 3.0]
   trepa_loss_weight: 10
-  inference_steps: 20
+  inference_steps: 30
   trainable_modules:
     - motion_modules.
     - attentions.
