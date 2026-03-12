@@ -141,7 +141,7 @@ class AlignRestore(object):
             if p_bias is None:
                 p_bias = bias
             else:
-                bias = p_bias * 0.2 + bias * 0.8
+                bias = p_bias * 0.5 + bias * 0.5
             p_bias = bias
             M[:, 2] = M[:, 2] + bias
 
