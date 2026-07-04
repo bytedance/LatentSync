@@ -264,8 +264,10 @@ class LipsyncPipeline(DiffusionPipeline):
         return faces, boxes, affine_matrices
 
     def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list):
+        # Yield each restored frame instead of stacking them in CPU RAM. Combined with
+        # write_video's imageio streaming writer this keeps peak CPU RAM independent of
+        # frame count for the restore + encode stage (see #326).
         video_frames = video_frames[: len(faces)]
-        out_frames = []
         print(f"Restoring {len(faces)} faces...")
         for index, face in enumerate(tqdm.tqdm(faces)):
             x1, y1, x2, y2 = boxes[index]
@@ -275,8 +277,7 @@ class LipsyncPipeline(DiffusionPipeline):
                 face, size=(height, width), interpolation=transforms.InterpolationMode.BICUBIC, antialias=True
             )
             out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
-            out_frames.append(out_frame)
-        return np.stack(out_frames, axis=0)
+            yield out_frame
 
     def loop_video(self, whisper_chunks: list, video_frames: np.ndarray):
         # If the audio is longer than the video, we need to loop the video
@@ -457,9 +458,12 @@ class LipsyncPipeline(DiffusionPipeline):
             )
             synced_video_frames.append(decoded_latents)
 
-        synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
+        # restore_video is a generator; drive it lazily from write_video below so
+        # restored frames are not materialized all at once.
+        synced_faces = torch.cat(synced_video_frames)
+        num_synced_frames = synced_faces.shape[0]
 
-        audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
+        audio_samples_remain_length = int(num_synced_frames / video_fps * audio_sample_rate)
         audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
 
         if is_train:
@@ -469,7 +473,11 @@ class LipsyncPipeline(DiffusionPipeline):
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir, exist_ok=True)
 
-        write_video(os.path.join(temp_dir, "video.mp4"), synced_video_frames, fps=video_fps)
+        write_video(
+            os.path.join(temp_dir, "video.mp4"),
+            self.restore_video(synced_faces, video_frames, boxes, affine_matrices),
+            fps=video_fps,
+        )
 
         sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
 
