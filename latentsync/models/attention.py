@@ -1,5 +1,6 @@
 # Adapted from https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention.py
 
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -199,6 +200,9 @@ class BasicTransformerBlock(nn.Module):
         return hidden_states
 
 
+MPS_ATTENTION_BUDGET_BYTES = int(float(os.environ.get("MPS_ATTENTION_BUDGET_MB", "1024")) * (1 << 20))
+
+
 class Attention(nn.Module):
     def __init__(
         self,
@@ -247,6 +251,32 @@ class Attention(nn.Module):
         tensor = tensor.reshape(batch_size, seq_len, heads * head_dim)
         return tensor
 
+    @staticmethod
+    def scaled_dot_product_attention(query, key, value, attention_mask=None):
+        # Use PyTorch native implementation of FlashAttention-2
+        if query.device.type != "mps":
+            return F.scaled_dot_product_attention(query, key, value, attn_mask=attention_mask)
+
+        # MPS materializes the full attention matrix, which can exceed the 16 GiB Metal buffer limit at 512x512
+        # (32 frames x 8 heads x 4096 tokens). Process the batch in chunks; the result is identical.
+        batch_size, heads, q_len, _ = query.shape
+        score_bytes_per_sample = heads * q_len * key.shape[2] * query.element_size()
+        chunk_size = max(1, MPS_ATTENTION_BUDGET_BYTES // score_bytes_per_sample)
+        if chunk_size >= batch_size:
+            return F.scaled_dot_product_attention(query, key, value, attn_mask=attention_mask)
+
+        outputs = []
+        for i in range(0, batch_size, chunk_size):
+            mask = attention_mask
+            if mask is not None and mask.ndim == 4 and mask.shape[0] == batch_size:
+                mask = mask[i : i + chunk_size]
+            outputs.append(
+                F.scaled_dot_product_attention(
+                    query[i : i + chunk_size], key[i : i + chunk_size], value[i : i + chunk_size], attn_mask=mask
+                )
+            )
+        return torch.cat(outputs, dim=0)
+
     def forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None):
         if self.group_norm is not None:
             hidden_states = self.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
@@ -267,8 +297,7 @@ class Attention(nn.Module):
                 attention_mask = F.pad(attention_mask, (0, target_length), value=0.0)
                 attention_mask = attention_mask.repeat_interleave(self.heads, dim=0)
 
-        # Use PyTorch native implementation of FlashAttention-2
-        hidden_states = F.scaled_dot_product_attention(query, key, value, attn_mask=attention_mask)
+        hidden_states = self.scaled_dot_product_attention(query, key, value, attention_mask)
 
         hidden_states = self.concat_heads(hidden_states)
 

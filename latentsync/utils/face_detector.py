@@ -1,16 +1,28 @@
 from insightface.app import FaceAnalysis
 import numpy as np
 import torch
+import onnxruntime as ort
+from latentsync.utils.util import get_default_device
 
 INSIGHTFACE_DETECT_SIZE = 512
 
 
 class FaceDetector:
-    def __init__(self, device="cuda"):
+    def __init__(self, device=None):
+        device = torch.device(device or get_default_device())
+        preferred = {
+            "cuda": ["CUDAExecutionProvider"],
+            "mps": ["CoreMLExecutionProvider"],
+        }.get(device.type, [])
+        available = ort.get_available_providers()
+        providers = [p for p in preferred if p in available] + ["CPUExecutionProvider"]
+        print(f"FaceDetector providers: {providers}")
+        if preferred and providers == ["CPUExecutionProvider"]:
+            print(f"WARNING: {preferred[0]} unavailable, face detection runs on CPU")
         self.app = FaceAnalysis(
             allowed_modules=["detection", "landmark_2d_106"],
             root="checkpoints/auxiliary",
-            providers=["CUDAExecutionProvider"],
+            providers=providers,
         )
         self.app.prepare(ctx_id=cuda_to_int(device), det_size=(INSIGHTFACE_DETECT_SIZE, INSIGHTFACE_DETECT_SIZE))
 
@@ -69,16 +81,17 @@ class FaceDetector:
             return (x1, y1, x2, y2), lmk
 
 
-def cuda_to_int(cuda_str: str) -> int:
+def cuda_to_int(device) -> int:
     """
-    Convert the string with format "cuda:X" to integer X.
+    Convert a device to the insightface ctx_id: the GPU index for cuda, 0 for mps
+    (the provider is chosen through `providers`), -1 for cpu.
     """
-    if cuda_str == "cuda":
-        return 0
-    device = torch.device(cuda_str)
-    if device.type != "cuda":
-        raise ValueError(f"Device type must be 'cuda', got: {device.type}")
-    return device.index
+    device = torch.device(device)
+    if device.type == "cpu":
+        return -1
+    if device.type not in ("cuda", "mps"):
+        raise ValueError(f"Unsupported device type: {device.type}")
+    return device.index or 0
 
 
 LMK_ADAPT_ORIGIN_ORDER = [

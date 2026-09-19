@@ -287,3 +287,34 @@ class dummy_context:
 
     def __exit__(self, *args):
         pass
+
+
+def get_default_device() -> str:
+    """Single place where the compute device is chosen: cuda > mps > cpu."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def get_default_dtype(device=None) -> torch.dtype:
+    """float16 on CUDA GPUs with compute capability > 7, float32 otherwise (fp16 on mps degrades the output).
+
+    LATENTSYNC_DTYPE (float32, bfloat16 or float16) overrides the default, e.g. bfloat16 to halve the memory on mps.
+    """
+    override = os.environ.get("LATENTSYNC_DTYPE")
+    if override:
+        return getattr(torch, override)
+    device_type = torch.device(device or get_default_device()).type
+    if device_type == "cuda" and torch.cuda.get_device_capability()[0] > 7:
+        return torch.float16
+    return torch.float32
+
+
+def empty_cache(device=None):
+    device_type = torch.device(device or get_default_device()).type
+    if device_type == "cuda":
+        torch.cuda.empty_cache()
+    elif device_type == "mps":
+        torch.mps.empty_cache()

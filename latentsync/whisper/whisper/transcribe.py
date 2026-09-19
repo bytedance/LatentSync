@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import tqdm
 
+from latentsync.utils.util import get_default_device
 from .audio import SAMPLE_RATE, N_FRAMES, HOP_LENGTH, pad_or_trim, log_mel_spectrogram
 from .decoding import DecodingOptions, DecodingResult
 from .tokenizer import LANGUAGES, TO_LANGUAGE_CODE, get_tokenizer
@@ -72,11 +73,11 @@ def transcribe(
     the spoken language ("language"), which is detected when `decode_options["language"]` is None.
     """
     dtype = torch.float16 if decode_options.get("fp16", True) else torch.float32
-    if model.device == torch.device("cpu"):
-        if torch.cuda.is_available():
+    if model.device.type != "cuda":
+        if model.device.type == "cpu" and torch.cuda.is_available():
             warnings.warn("Performing inference on CPU when CUDA is available")
         if dtype == torch.float16:
-            warnings.warn("FP16 is not supported on CPU; using FP32 instead")
+            warnings.warn("FP16 is only used on CUDA; using FP32 instead")
             dtype = torch.float32
 
     if dtype == torch.float32:
@@ -135,7 +136,7 @@ def cli():
     parser.add_argument("audio", nargs="+", type=str, help="audio file(s) to transcribe")
     parser.add_argument("--model", default="small", choices=available_models(), help="name of the Whisper model to use")
     parser.add_argument("--model_dir", type=str, default=None, help="the path to save model files; uses ~/.cache/whisper by default")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="device to use for PyTorch inference")
+    parser.add_argument("--device", default=get_default_device(), help="device to use for PyTorch inference")
     parser.add_argument("--output_dir", "-o", type=str, default=".", help="directory to save the outputs")
     parser.add_argument("--verbose", type=str2bool, default=True, help="whether to print out the progress and debug messages")
 

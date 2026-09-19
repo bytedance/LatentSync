@@ -104,7 +104,7 @@ class Audio2Feature:
 
     def _audio2feat(self, audio_path: str):
         # get the sample rate of the audio
-        result = self.model.transcribe(audio_path)
+        result = self.model.transcribe(audio_path, fp16=self.model.device.type == "cuda")
         embed_list = []
         for emb in result["segments"]:
             encoder_embeddings = emb["encoder_embeddings"]

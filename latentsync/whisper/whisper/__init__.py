@@ -8,6 +8,7 @@ from typing import List, Optional, Union
 import torch
 from tqdm import tqdm
 
+from latentsync.utils.util import get_default_device, empty_cache
 from .audio import load_audio, log_mel_spectrogram, pad_or_trim
 from .decoding import DecodingOptions, DecodingResult, decode, detect_language
 from .model import Whisper, ModelDimensions
@@ -95,9 +96,8 @@ def load_model(
     model : Whisper
         The Whisper ASR model instance
     """
-
     if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = get_default_device()
     if download_root is None:
         download_root = os.getenv("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache", "whisper"))
 
@@ -117,6 +117,6 @@ def load_model(
     model.load_state_dict(checkpoint["model_state_dict"])
 
     del checkpoint
-    torch.cuda.empty_cache()
+    empty_cache(device)
 
     return model.to(device)

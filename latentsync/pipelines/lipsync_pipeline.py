@@ -31,13 +31,16 @@ from einops import rearrange
 import cv2
 
 from ..models.unet import UNet3DConditionModel
-from ..utils.util import read_video, read_audio, write_video, check_ffmpeg_installed
+from ..utils.util import read_video, read_audio, write_video, check_ffmpeg_installed, empty_cache
 from ..utils.image_processor import ImageProcessor, load_fixed_mask
 from ..whisper.audio2feature import Audio2Feature
 import tqdm
 import soundfile as sf
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+
+VAE_CHUNK_SIZE = int(os.environ.get("VAE_CHUNK_SIZE", "4"))
 
 
 class LipsyncPipeline(DiffusionPipeline):
@@ -140,8 +143,13 @@ class LipsyncPipeline(DiffusionPipeline):
     def decode_latents(self, latents):
         latents = latents / self.vae.config.scaling_factor + self.vae.config.shift_factor
         latents = rearrange(latents, "b c f h w -> (b f) c h w")
-        decoded_latents = self.vae.decode(latents).sample
+        # The VAE works frame by frame: run it in small batches to limit peak memory
+        decoded_latents = torch.cat([self.vae.decode(chunk).sample for chunk in latents.split(VAE_CHUNK_SIZE)])
         return decoded_latents
+
+    def encode_images(self, images, generator):
+        latent_dists = [self.vae.encode(chunk).latent_dist for chunk in images.split(VAE_CHUNK_SIZE)]
+        return torch.cat([latent_dist.sample(generator=generator) for latent_dist in latent_dists])
 
     def prepare_extra_step_kwargs(self, generator, eta):
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
@@ -202,7 +210,7 @@ class LipsyncPipeline(DiffusionPipeline):
         masked_image = masked_image.to(device=device, dtype=dtype)
 
         # encode the mask image into latents space so we can concatenate it to the latents
-        masked_image_latents = self.vae.encode(masked_image).latent_dist.sample(generator=generator)
+        masked_image_latents = self.encode_images(masked_image, generator)
         masked_image_latents = (masked_image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
 
         # aligning device to prevent device errors when concating it with the latent model input
@@ -221,7 +229,7 @@ class LipsyncPipeline(DiffusionPipeline):
 
     def prepare_image_latents(self, images, device, dtype, generator, do_classifier_free_guidance):
         images = images.to(device=device, dtype=dtype)
-        image_latents = self.vae.encode(images).latent_dist.sample(generator=generator)
+        image_latents = self.encode_images(images, generator)
         image_latents = (image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
         image_latents = rearrange(image_latents, "f c h w -> 1 c f h w")
         image_latents = torch.cat([image_latents] * 2) if do_classifier_free_guidance else image_latents
@@ -339,7 +347,7 @@ class LipsyncPipeline(DiffusionPipeline):
         # 0. Define call parameters
         device = self._execution_device
         mask_image = load_fixed_mask(height, mask_image_path)
-        self.image_processor = ImageProcessor(height, device="cuda", mask_image=mask_image)
+        self.image_processor = ImageProcessor(height, device=device, mask_image=mask_image)
         self.set_progress_bar_config(desc=f"Sample frames: {num_frames}")
 
         # 1. Default height and width to unet
@@ -456,6 +464,7 @@ class LipsyncPipeline(DiffusionPipeline):
                 decoded_latents, ref_pixel_values, 1 - masks, device, weight_dtype
             )
             synced_video_frames.append(decoded_latents)
+            empty_cache(device)
 
         synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
 

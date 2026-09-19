@@ -9,6 +9,12 @@
 
 </div>
 
+> [!NOTE]
+> **This is a fork of [bytedance/LatentSync](https://github.com/bytedance/LatentSync) that adds support for macOS / Apple Silicon (MPS).**
+> The model, training code and checkpoints are unchanged and remain the work of the original authors (see [Acknowledgement](#-acknowledgement) and [Citation](#-citation)).
+> 
+> Jump to [🍎 macOS / Apple Silicon](#-macos--apple-silicon-fork) for the setup guide.
+
 ## 🔥 Updates
 
 - `2025/06/11`: We released **LatentSync 1.6**, which is trained on 512 $\times$ 512 resolution videos to mitigate the blurriness problem. Watch the demo [here](docs/changelog_v1.6.md).
@@ -84,7 +90,82 @@ LatentSync uses the [Whisper](https://github.com/openai/whisper) to convert mels
 - [x] Data processing pipeline
 - [x] Training code
 
+## 🍎 macOS / Apple Silicon (fork)
+
+This fork makes LatentSync run on Apple Silicon GPUs through PyTorch MPS, with CPU fallback. The original CUDA path is kept: the device is picked automatically (`cuda` > `mps` > `cpu`).
+
+Tested on a **MacBook M3 with 18 GB of unified memory**:
+
+| Model | Resolution | Status on M3 18 GB |
+| --- | --- | --- |
+| LatentSync 1.5 | 256 × 256 | Runs efficiently with the default settings |
+| LatentSync 1.6 | 512 × 512 | Runs, but slower, with the memory variables below |
+
+### What was changed
+
+- Automatic device / dtype selection (`latentsync/utils/util.py`) instead of hard-coded `"cuda"`; float32 by default on MPS, since float16 degrades the output.
+- Chunked attention on MPS to stay under the Metal buffer size limit at 512 × 512 (same result, lower peak memory).
+- VAE encoding/decoding by batches of frames to lower peak memory.
+- Face detection through ONNX Runtime CoreML instead of CUDA.
+- Whisper runs in float32 outside CUDA.
+- Python 3.13 environment managed with [`uv`](https://docs.astral.sh/uv/), and refreshed dependencies (see `requirements.txt`).
+
+### Setup
+
+Requires [`uv`](https://docs.astral.sh/uv/) and, if missing, Homebrew to install `ffmpeg`.
+
+```bash
+source setup_env.sh
+```
+
+This downloads the checkpoints for both LatentSync 1.6 (`checkpoints/`) and 1.5 (`checkpoints/v1.5/`).
+
+### Run LatentSync 1.5 at 256 × 256 (recommended on 18 GB)
+
+This is the default configuration of `inference.sh`:
+
+```bash
+./inference.sh
+```
+
+which runs `configs/unet/stage2.yaml` with `checkpoints/v1.5/latentsync_unet.pt`.
+
+### Run at 512 × 512 (LatentSync 1.6, slower)
+
+In `inference.sh`, use the 512 config and the 1.6 checkpoint:
+
+```bash
+--unet_config_path "configs/unet/stage2_512.yaml" \
+--inference_ckpt_path "checkpoints/latentsync_unet.pt" \
+```
+
+then lower the memory usage with the environment variables below:
+
+```bash
+LATENTSYNC_DTYPE=bfloat16 MPS_ATTENTION_BUDGET_MB=256 VAE_CHUNK_SIZE=2 ./inference.sh
+```
+
+### Memory environment variables
+
+Set them when the process is killed or the machine swaps heavily. All are optional.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `LATENTSYNC_DTYPE` | `float32` on MPS | `float32`, `bfloat16` or `float16`. `bfloat16` halves the memory of models and activations. |
+| `MPS_ATTENTION_BUDGET_MB` | `1024` | Memory budget of the attention scores. Lower = less memory, more chunks. |
+| `VAE_CHUNK_SIZE` | `16` | Number of frames per VAE batch. Lower = less memory. |
+
+`PYTORCH_ENABLE_MPS_FALLBACK=1` (already set in `inference.sh`) falls back to the CPU for operations not yet implemented on MPS.
+
+> [!NOTE]
+> Forcing `LATENTSYNC_DTYPE=bfloat16` is also worthwhile at 256 resolution: it speeds up inference by almost 20% with minimal quality degradation (measured on the 256 model, not a guarantee for every video).
+
+> [!TIP]
+> The values above (`bfloat16`, `256`, `2`) are a conservative starting point for 18 GB, not tuned optima. Raise `MPS_ATTENTION_BUDGET_MB` and `VAE_CHUNK_SIZE` if you have more memory to go faster. Lowering `--inference_steps` (e.g. 5–8 with `--enable_deepcache`) also shortens the run at some cost in quality.
+
 ## 🔧 Setting up the Environment
+
+> On macOS, follow the [macOS / Apple Silicon](#-macos--apple-silicon-fork) section above.
 
 Install the required packages and download the checkpoints via:
 

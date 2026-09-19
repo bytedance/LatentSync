@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from latentsync.utils.util import read_video, write_video
+from latentsync.utils.util import read_video, write_video, get_default_device, get_default_dtype
 from torchvision import transforms
 import cv2
 from einops import rearrange
@@ -21,10 +21,36 @@ import numpy as np
 from typing import Union
 from .affine_transform import AlignRestore
 from .face_detector import FaceDetector
+from pathlib import Path
 
 
-def load_fixed_mask(resolution: int, mask_image_path="latentsync/utils/mask.png") -> torch.Tensor:
-    mask_image = cv2.imread(mask_image_path)
+def load_fixed_mask(
+    resolution: int,
+    mask_image_path: Union[str, Path, None] = None,
+) -> torch.Tensor:
+    """
+    Load the fixed mask image.
+
+    If mask_image_path is not provided, use the mask.png file located
+    next to this Python module.
+    """
+    if mask_image_path is None:
+        mask_image_path = Path(__file__).resolve().parent / "mask.png"
+    else:
+        mask_image_path = Path(mask_image_path).expanduser().resolve()
+
+    if not mask_image_path.is_file():
+        raise FileNotFoundError(
+            f"Mask image not found: {mask_image_path}"
+        )
+
+    mask_image = cv2.imread(str(mask_image_path))
+
+    if mask_image is None:
+        raise RuntimeError(
+            f"OpenCV could not read mask image: {mask_image_path}"
+        )
+
     mask_image = cv2.cvtColor(mask_image, cv2.COLOR_BGR2RGB)
     mask_image = cv2.resize(mask_image, (resolution, resolution), interpolation=cv2.INTER_LANCZOS4) / 255.0
     mask_image = rearrange(torch.from_numpy(mask_image), "h w c -> c h w")
@@ -39,7 +65,11 @@ class ImageProcessor:
         )
         self.normalize = transforms.Normalize([0.5], [0.5], inplace=True)
 
-        self.restorer = AlignRestore(resolution=resolution, device=device)
+        # The warp works on 0-255 pixel values: bfloat16 is too imprecise there, and this step is cheap in memory
+        restorer_dtype = get_default_dtype(device)
+        if restorer_dtype == torch.bfloat16:
+            restorer_dtype = torch.float32
+        self.restorer = AlignRestore(resolution=resolution, device=device, dtype=restorer_dtype)
 
         if mask_image is None:
             self.mask_image = load_fixed_mask(resolution)
@@ -117,6 +147,6 @@ class VideoProcessor:
 
 
 if __name__ == "__main__":
-    video_processor = VideoProcessor(256, "cuda")
+    video_processor = VideoProcessor(256, get_default_device())
     video_frames = video_processor.affine_transform_video("assets/demo2_video.mp4")
     write_video("output.mp4", video_frames, fps=25)

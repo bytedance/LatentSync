@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import torch
+if hasattr(torch, "mps") and not hasattr(torch.mps, "current_device"):
+    torch.mps.current_device = lambda: 0
 
 import argparse
 import os
@@ -21,6 +24,7 @@ from latentsync.models.unet import UNet3DConditionModel
 from latentsync.pipelines.lipsync_pipeline import LipsyncPipeline
 from accelerate.utils import set_seed
 from latentsync.whisper.audio2feature import Audio2Feature
+from latentsync.utils.util import get_default_device, get_default_dtype
 from DeepCache import DeepCacheSDHelper
 
 
@@ -30,9 +34,12 @@ def main(config, args):
     if not os.path.exists(args.audio_path):
         raise RuntimeError(f"Audio path '{args.audio_path}' not found")
 
-    # Check if the GPU supports float16
-    is_fp16_supported = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] > 7
-    dtype = torch.float16 if is_fp16_supported else torch.float32
+    device = get_default_device()
+    dtype = get_default_dtype(device)
+
+    print(f"Using device: {device}, dtype: {dtype}")
+    if device == "cpu":
+        print("WARNING: no GPU/MPS available, running on CPU (very slow)")
 
     print(f"Input video path: {args.video_path}")
     print(f"Input audio path: {args.audio_path}")
@@ -49,7 +56,7 @@ def main(config, args):
 
     audio_encoder = Audio2Feature(
         model_path=whisper_model_path,
-        device="cuda",
+        device=device,
         num_frames=config.data.num_frames,
         audio_feat_length=config.data.audio_feat_length,
     )
@@ -64,14 +71,15 @@ def main(config, args):
         device="cpu",
     )
 
-    unet = unet.to(dtype=dtype)
+    if unet.dtype != dtype:
+        unet = unet.to(dtype=dtype)
 
     pipeline = LipsyncPipeline(
         vae=vae,
         audio_encoder=audio_encoder,
         unet=unet,
         scheduler=scheduler,
-    ).to("cuda")
+    ).to(device)
 
     # use DeepCache
     if args.enable_deepcache:
