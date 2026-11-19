@@ -29,8 +29,8 @@ from torchvision import transforms
 from einops import rearrange
 import cv2
 from decord import AudioReader, VideoReader
-import shutil
 import subprocess
+import tempfile
 
 
 # Machine epsilon for a float32 (single precision)
@@ -44,23 +44,18 @@ def read_json(filepath: str):
 
 
 def read_video(video_path: str, change_fps=True, use_decord=True):
-    if change_fps:
-        temp_dir = "temp"
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        os.makedirs(temp_dir, exist_ok=True)
-        command = (
-            f"ffmpeg -loglevel error -y -nostdin -i {video_path} -r 25 -crf 18 {os.path.join(temp_dir, 'video.mp4')}"
-        )
-        subprocess.run(command, shell=True)
-        target_video_path = os.path.join(temp_dir, "video.mp4")
-    else:
-        target_video_path = video_path
+    read_frames = read_video_decord if use_decord else read_video_cv2
+    if not change_fps:
+        return read_frames(video_path)
 
-    if use_decord:
-        return read_video_decord(target_video_path)
-    else:
-        return read_video_cv2(target_video_path)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target_video_path = os.path.join(temp_dir, "video.mp4")
+        subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-y", "-nostdin", "-i", video_path,
+             "-r", "25", "-crf", "18", target_video_path],
+            check=True,
+        )
+        return read_frames(target_video_path)
 
 
 def read_video_decord(video_path: str):

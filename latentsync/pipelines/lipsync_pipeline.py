@@ -3,7 +3,7 @@
 import inspect
 import math
 import os
-import shutil
+import tempfile
 from typing import Callable, List, Optional, Union
 import subprocess
 
@@ -465,13 +465,16 @@ class LipsyncPipeline(DiffusionPipeline):
         if is_train:
             self.unet.train()
 
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
         os.makedirs(temp_dir, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temp_dir) as work_dir:
+            temp_video_path = os.path.join(work_dir, "video.mp4")
+            temp_audio_path = os.path.join(work_dir, "audio.wav")
+            write_video(temp_video_path, synced_video_frames, fps=video_fps)
+            sf.write(temp_audio_path, audio_samples, audio_sample_rate)
 
-        write_video(os.path.join(temp_dir, "video.mp4"), synced_video_frames, fps=video_fps)
-
-        sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
-
-        command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
-        subprocess.run(command, shell=True)
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-nostdin", "-i", temp_video_path,
+                 "-i", temp_audio_path, "-c:v", "libx264", "-crf", "18", "-c:a", "aac",
+                 "-q:v", "0", "-q:a", "0", video_out_path],
+                check=True,
+            )
